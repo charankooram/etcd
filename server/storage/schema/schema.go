@@ -17,11 +17,12 @@ package schema
 import (
 	"fmt"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/wal"
 )
 
 // Validate checks provided backend to confirm that schema used is supported.
@@ -43,37 +44,35 @@ func unsafeValidate(lg *zap.Logger, tx backend.UnsafeReader) error {
 }
 
 func localBinaryVersion() semver.Version {
-	v := semver.New(version.Version)
-	return semver.Version{Major: v.Major, Minor: v.Minor}
-}
-
-type WALVersion interface {
-	// MinimalEtcdVersion returns minimal etcd version able to interpret WAL log.
-	MinimalEtcdVersion() *semver.Version
+	v := semver.MustParse(version.Version)
+	return *semver.New(v.Major(), v.Minor(), 0, "", "")
 }
 
 // Migrate updates storage schema to provided target version.
 // Downgrading requires that provided WAL doesn't contain unsupported entries.
-func Migrate(lg *zap.Logger, tx backend.BatchTx, w WALVersion, target semver.Version) error {
+func Migrate(lg *zap.Logger, tx backend.BatchTx, w wal.Version, target semver.Version) error {
 	tx.LockOutsideApply()
 	defer tx.Unlock()
 	return UnsafeMigrate(lg, tx, w, target)
 }
 
 // UnsafeMigrate is non thread-safe version of Migrate.
-func UnsafeMigrate(lg *zap.Logger, tx backend.UnsafeReadWriter, w WALVersion, target semver.Version) error {
+func UnsafeMigrate(lg *zap.Logger, tx backend.UnsafeReadWriter, w wal.Version, target semver.Version) error {
 	current, err := UnsafeDetectSchemaVersion(lg, tx)
 	if err != nil {
-		return fmt.Errorf("cannot detect storage schema version: %v", err)
+		return fmt.Errorf("cannot detect storage schema version: %w", err)
 	}
 	plan, err := newPlan(lg, current, target)
 	if err != nil {
-		return fmt.Errorf("cannot create migration plan: %v", err)
+		return fmt.Errorf("cannot create migration plan: %w", err)
 	}
-	if target.LessThan(current) {
+	if target.LessThan(&current) {
 		minVersion := w.MinimalEtcdVersion()
-		if minVersion != nil && target.LessThan(*minVersion) {
-			return fmt.Errorf("cannot downgrade storage, WAL contains newer entries")
+		if minVersion != nil && target.LessThan(minVersion) {
+			// Occasionally we may see this error during downgrade test due to ClusterVersionSet,
+			// which is harmless. Please read https://github.com/etcd-io/etcd/pull/13405#discussion_r1890378185.
+			return fmt.Errorf("cannot downgrade storage, WAL contains newer entries, as the target version (%s) is lower than the version (%s) detected from WAL logs",
+				target.String(), minVersion.String())
 		}
 	}
 	return plan.unsafeExecute(lg, tx)
@@ -95,10 +94,12 @@ func UnsafeDetectSchemaVersion(lg *zap.Logger, tx backend.UnsafeReader) (v semve
 	if vp != nil {
 		return *vp, nil
 	}
-	confstate := UnsafeConfStateFromBackend(lg, tx)
-	if confstate == nil {
-		return v, fmt.Errorf("missing confstate information")
-	}
+
+	// TODO: remove the operations of reading the field `term`
+	// in 3.7. We only need to be back-compatible with 3.6 when
+	// we are running 3.7, and the `storageVersion` already exists
+	// in all versions >= 3.6, so we don't need to use any other
+	// fields to identify the etcd's storage version.
 	_, term := UnsafeReadConsistentIndex(tx)
 	if term == 0 {
 		return v, fmt.Errorf("missing term information")
@@ -108,9 +109,9 @@ func UnsafeDetectSchemaVersion(lg *zap.Logger, tx backend.UnsafeReader) (v semve
 
 func schemaChangesForVersion(v semver.Version, isUpgrade bool) ([]schemaChange, error) {
 	// changes should be taken from higher version
-	var higherV = v
+	higherV := v
 	if isUpgrade {
-		higherV = semver.Version{Major: v.Major, Minor: v.Minor + 1}
+		higherV = *semver.New(v.Major(), v.Minor()+1, 0, "", "")
 	}
 
 	actions, found := schemaChanges[higherV]
@@ -130,6 +131,8 @@ var (
 		version.V3_6: {
 			addNewField(Meta, MetaStorageVersionName, emptyStorageVersion),
 		},
+		version.V3_7: {},
+		version.V3_8: {},
 	}
 	// emptyStorageVersion is used for v3.6 Step for the first time, in all other version StoragetVersion should be set by migrator.
 	// Adding a addNewField for StorageVersion we can reuse logic to remove it when downgrading to v3.5

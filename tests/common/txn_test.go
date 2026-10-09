@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -58,25 +59,21 @@ func TestTxnSucc(t *testing.T) {
 	}
 	for _, cfg := range clusterTestCases() {
 		t.Run(cfg.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(cfg.config))
 			defer clus.Close()
 			cc := testutils.MustClient(clus.Client())
 			testutils.ExecuteUntil(ctx, t, func() {
-				if err := cc.Put(ctx, "key1", "value1", config.PutOptions{}); err != nil {
-					t.Fatalf("could not create key:%s, value:%s", "key1", "value1")
-				}
-				if err := cc.Put(ctx, "key2", "value2", config.PutOptions{}); err != nil {
-					t.Fatalf("could not create key:%s, value:%s", "key2", "value2")
-				}
+				_, err := cc.Put(ctx, "key1", "value1", config.PutOptions{})
+				require.NoErrorf(t, err, "could not create key:%s, value:%s", "key1", "value1")
+				_, err = cc.Put(ctx, "key2", "value2", config.PutOptions{})
+				require.NoErrorf(t, err, "could not create key:%s, value:%s", "key2", "value2")
 				for _, req := range reqs {
 					resp, err := cc.Txn(ctx, req.compare, req.ifSuccess, req.ifFail, config.TxnOptions{
 						Interactive: true,
 					})
-					if err != nil {
-						t.Errorf("Txn returned error: %s", err)
-					}
+					require.NoErrorf(t, err, "Txn returned error: %s", err)
 					assert.Equal(t, req.expectResults, getRespValues(resp))
 				}
 			})
@@ -102,22 +99,19 @@ func TestTxnFail(t *testing.T) {
 	}
 	for _, cfg := range clusterTestCases() {
 		t.Run(cfg.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(cfg.config))
 			defer clus.Close()
 			cc := testutils.MustClient(clus.Client())
 			testutils.ExecuteUntil(ctx, t, func() {
-				if err := cc.Put(ctx, "key1", "value1", config.PutOptions{}); err != nil {
-					t.Fatalf("could not create key:%s, value:%s", "key1", "value1")
-				}
+				_, err := cc.Put(ctx, "key1", "value1", config.PutOptions{})
+				require.NoErrorf(t, err, "could not create key:%s, value:%s", "key1", "value1")
 				for _, req := range reqs {
 					resp, err := cc.Txn(ctx, req.compare, req.ifSuccess, req.ifFail, config.TxnOptions{
 						Interactive: true,
 					})
-					if err != nil {
-						t.Errorf("Txn returned error: %s", err)
-					}
+					require.NoErrorf(t, err, "Txn returned error: %s", err)
 					assert.Equal(t, req.expectResults, getRespValues(resp))
 				}
 			})
@@ -135,17 +129,17 @@ func getRespValues(r *clientv3.TxnResponse) []string {
 	for _, resp := range r.Responses {
 		switch v := resp.Response.(type) {
 		case *pb.ResponseOp_ResponseDeleteRange:
-			r := (clientv3.DeleteResponse)(*v.ResponseDeleteRange)
-			ss = append(ss, fmt.Sprintf("%d", r.Deleted))
+			r := v.ResponseDeleteRange
+			ss = append(ss, fmt.Sprintf("%d", r.GetDeleted()))
 		case *pb.ResponseOp_ResponsePut:
-			r := (clientv3.PutResponse)(*v.ResponsePut)
+			r := v.ResponsePut
 			ss = append(ss, "OK")
-			if r.PrevKv != nil {
+			if r.GetPrevKv() != nil {
 				ss = append(ss, string(r.PrevKv.Key), string(r.PrevKv.Value))
 			}
 		case *pb.ResponseOp_ResponseRange:
-			r := (clientv3.GetResponse)(*v.ResponseRange)
-			for _, kv := range r.Kvs {
+			r := v.ResponseRange
+			for _, kv := range r.GetKvs() {
 				ss = append(ss, string(kv.Key), string(kv.Value))
 			}
 		default:

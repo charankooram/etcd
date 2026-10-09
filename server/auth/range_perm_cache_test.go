@@ -47,22 +47,26 @@ func TestRangePermission(t *testing.T) {
 		},
 		{
 			[]adt.Interval{adt.NewBytesAffineInterval([]byte("a"), []byte("d")), adt.NewBytesAffineInterval([]byte("a"), []byte("b")), adt.NewBytesAffineInterval([]byte("c"), []byte("f"))},
-			[]byte("a"), []byte{},
+			[]byte("a"),
+			[]byte{},
 			false,
 		},
 		{
 			[]adt.Interval{adt.NewBytesAffineInterval([]byte("a"), []byte{})},
-			[]byte("a"), []byte{},
+			[]byte("a"),
+			[]byte{},
 			true,
 		},
 		{
 			[]adt.Interval{adt.NewBytesAffineInterval([]byte{0x00}, []byte{})},
-			[]byte("a"), []byte{},
+			[]byte("a"),
+			[]byte{},
 			true,
 		},
 		{
 			[]adt.Interval{adt.NewBytesAffineInterval([]byte{0x00}, []byte{})},
-			[]byte{0x00}, []byte{},
+			[]byte{0x00},
+			[]byte{},
 			true,
 		},
 	}
@@ -73,7 +77,7 @@ func TestRangePermission(t *testing.T) {
 			readPerms.Insert(p, struct{}{})
 		}
 
-		result := checkKeyInterval(zaptest.NewLogger(t), &unifiedRangePermissions{readPerms: readPerms}, tt.begin, tt.end, authpb.READ)
+		result := checkKeyInterval(zaptest.NewLogger(t), &unifiedRangePermissions{readPerms: readPerms}, tt.begin, tt.end, authpb.Permission_READ)
 		if result != tt.want {
 			t.Errorf("#%d: result=%t, want=%t", i, result, tt.want)
 		}
@@ -124,7 +128,7 @@ func TestKeyPermission(t *testing.T) {
 			readPerms.Insert(p, struct{}{})
 		}
 
-		result := checkKeyPoint(zaptest.NewLogger(t), &unifiedRangePermissions{readPerms: readPerms}, tt.key, authpb.READ)
+		result := checkKeyPoint(zaptest.NewLogger(t), &unifiedRangePermissions{readPerms: readPerms}, tt.key, authpb.Permission_READ)
 		if result != tt.want {
 			t.Errorf("#%d: result=%t, want=%t", i, result, tt.want)
 		}

@@ -1,5 +1,14 @@
 [
 	{
+		"project": "github.com/Masterminds/semver/v3",
+		"licenses": [
+			{
+				"type": "MIT License",
+				"confidence": 0.9891304347826086
+			}
+		]
+	},
+	{
 		"project": "github.com/VividCortex/ewma",
 		"licenses": [
 			{
@@ -10,6 +19,15 @@
 	},
 	{
 		"project": "github.com/anishathalye/porcupine",
+		"licenses": [
+			{
+				"type": "MIT License",
+				"confidence": 0.96875
+			}
+		]
+	},
+	{
+		"project": "github.com/antithesishq/antithesis-sdk-go",
 		"licenses": [
 			{
 				"type": "MIT License",
@@ -36,7 +54,7 @@
 		]
 	},
 	{
-		"project": "github.com/cenkalti/backoff/v4",
+		"project": "github.com/cenkalti/backoff/v5",
 		"licenses": [
 			{
 				"type": "MIT License",
@@ -63,10 +81,19 @@
 		]
 	},
 	{
-		"project": "github.com/coreos/go-semver/semver",
+		"project": "github.com/clipperhouse/displaywidth",
 		"licenses": [
 			{
-				"type": "Apache License 2.0",
+				"type": "MIT License",
+				"confidence": 1
+			}
+		]
+	},
+	{
+		"project": "github.com/clipperhouse/uax29/v2/graphemes",
+		"licenses": [
+			{
+				"type": "MIT License",
 				"confidence": 1
 			}
 		]
@@ -86,15 +113,6 @@
 			{
 				"type": "MIT License",
 				"confidence": 0.9891304347826086
-			}
-		]
-	},
-	{
-		"project": "github.com/davecgh/go-spew/spew",
-		"licenses": [
-			{
-				"type": "ISC License",
-				"confidence": 0.9850746268656716
 			}
 		]
 	},
@@ -135,29 +153,11 @@
 		]
 	},
 	{
-		"project": "github.com/gogo/protobuf",
-		"licenses": [
-			{
-				"type": "BSD 3-clause \"New\" or \"Revised\" License",
-				"confidence": 0.9163346613545816
-			}
-		]
-	},
-	{
-		"project": "github.com/golang-jwt/jwt/v4",
+		"project": "github.com/golang-jwt/jwt/v5",
 		"licenses": [
 			{
 				"type": "MIT License",
 				"confidence": 0.9891304347826086
-			}
-		]
-	},
-	{
-		"project": "github.com/golang/groupcache/lru",
-		"licenses": [
-			{
-				"type": "Apache License 2.0",
-				"confidence": 0.9966703662597114
 			}
 		]
 	},
@@ -171,16 +171,16 @@
 		]
 	},
 	{
-		"project": "github.com/google/btree",
+		"project": "github.com/google/go-cmp/cmp",
 		"licenses": [
 			{
-				"type": "Apache License 2.0",
-				"confidence": 1
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 0.9663865546218487
 			}
 		]
 	},
 	{
-		"project": "github.com/google/go-cmp/cmp",
+		"project": "github.com/google/uuid",
 		"licenses": [
 			{
 				"type": "BSD 3-clause \"New\" or \"Revised\" License",
@@ -198,7 +198,7 @@
 		]
 	},
 	{
-		"project": "github.com/grpc-ecosystem/go-grpc-middleware",
+		"project": "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus",
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
@@ -207,7 +207,7 @@
 		]
 	},
 	{
-		"project": "github.com/grpc-ecosystem/go-grpc-prometheus",
+		"project": "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors",
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
@@ -270,6 +270,42 @@
 		]
 	},
 	{
+		"project": "github.com/munnerz/goautoneg",
+		"licenses": [
+			{
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 0.9794238683127572
+			}
+		]
+	},
+	{
+		"project": "github.com/olekukonko/cat",
+		"licenses": [
+			{
+				"type": "MIT License",
+				"confidence": 1
+			}
+		]
+	},
+	{
+		"project": "github.com/olekukonko/errors",
+		"licenses": [
+			{
+				"type": "MIT License",
+				"confidence": 1
+			}
+		]
+	},
+	{
+		"project": "github.com/olekukonko/ll",
+		"licenses": [
+			{
+				"type": "MIT License",
+				"confidence": 1
+			}
+		]
+	},
+	{
 		"project": "github.com/olekukonko/tablewriter",
 		"licenses": [
 			{
@@ -279,11 +315,11 @@
 		]
 	},
 	{
-		"project": "github.com/pmezard/go-difflib/difflib",
+		"project": "github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil",
 		"licenses": [
 			{
 				"type": "BSD 3-clause \"New\" or \"Revised\" License",
-				"confidence": 0.9830508474576272
+				"confidence": 0.9663865546218487
 			}
 		]
 	},
@@ -319,15 +355,6 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
-			}
-		]
-	},
-	{
-		"project": "github.com/rivo/uniseg",
-		"licenses": [
-			{
-				"type": "MIT License",
 				"confidence": 1
 			}
 		]
@@ -378,6 +405,24 @@
 		]
 	},
 	{
+		"project": "github.com/stretchr/testify/internal/difflib",
+		"licenses": [
+			{
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 0.9830508474576272
+			}
+		]
+	},
+	{
+		"project": "github.com/stretchr/testify/internal/spew",
+		"licenses": [
+			{
+				"type": "ISC License",
+				"confidence": 0.9850746268656716
+			}
+		]
+	},
+	{
 		"project": "github.com/tmc/grpc-websocket-proxy/wsproxy",
 		"licenses": [
 			{
@@ -409,7 +454,16 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
+			}
+		]
+	},
+	{
+		"project": "go.etcd.io/etcd/cache/v3",
+		"licenses": [
+			{
+				"type": "Apache License 2.0",
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -418,16 +472,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
-			}
-		]
-	},
-	{
-		"project": "go.etcd.io/etcd/client/v2",
-		"licenses": [
-			{
-				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -436,7 +481,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -445,7 +490,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -454,7 +499,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -463,7 +508,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -472,7 +517,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -481,7 +526,16 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
+			}
+		]
+	},
+	{
+		"project": "go.etcd.io/etcd/tests/v3/pkg/rand",
+		"licenses": [
+			{
+				"type": "Apache License 2.0",
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -490,7 +544,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9988925802879292
 			}
 		]
 	},
@@ -513,11 +567,20 @@
 		]
 	},
 	{
-		"project": "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
+		"project": "go.opentelemetry.io/auto/sdk",
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
 				"confidence": 1
+			}
+		]
+	},
+	{
+		"project": "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
+		"licenses": [
+			{
+				"type": "Apache License 2.0",
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -526,7 +589,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -535,7 +598,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -544,7 +607,16 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9647812166488794
+			}
+		]
+	},
+	{
+		"project": "go.opentelemetry.io/otel/log",
+		"licenses": [
+			{
+				"type": "Apache License 2.0",
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -553,7 +625,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -562,7 +634,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -571,7 +643,7 @@
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 1
+				"confidence": 0.9647812166488794
 			}
 		]
 	},
@@ -603,7 +675,38 @@
 		]
 	},
 	{
+		"project": "go.yaml.in/yaml/v2",
+		"licenses": [
+			{
+				"type": "Apache License 2.0",
+				"confidence": 1
+			},
+			{
+				"type": "MIT License",
+				"confidence": 0.8975609756097561
+			}
+		]
+	},
+	{
+		"project": "go.yaml.in/yaml/v3",
+		"licenses": [
+			{
+				"type": "MIT License",
+				"confidence": 0.7469879518072289
+			}
+		]
+	},
+	{
 		"project": "golang.org/x/crypto",
+		"licenses": [
+			{
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 0.9663865546218487
+			}
+		]
+	},
+	{
+		"project": "golang.org/x/mod/semver",
 		"licenses": [
 			{
 				"type": "BSD 3-clause \"New\" or \"Revised\" License",
@@ -630,7 +733,7 @@
 		]
 	},
 	{
-		"project": "golang.org/x/sys/unix",
+		"project": "golang.org/x/sys",
 		"licenses": [
 			{
 				"type": "BSD 3-clause \"New\" or \"Revised\" License",
@@ -649,6 +752,15 @@
 	},
 	{
 		"project": "golang.org/x/time/rate",
+		"licenses": [
+			{
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 0.9663865546218487
+			}
+		]
+	},
+	{
+		"project": "golang.org/x/tools",
 		"licenses": [
 			{
 				"type": "BSD 3-clause \"New\" or \"Revised\" License",
@@ -702,20 +814,29 @@
 		]
 	},
 	{
-		"project": "gopkg.in/yaml.v3",
+		"project": "k8s.io/utils/internal/third_party/forked/golang/golang-lru",
 		"licenses": [
 			{
-				"type": "MIT License",
-				"confidence": 0.7469879518072289
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 0.9663865546218487
 			}
 		]
 	},
 	{
-		"project": "sigs.k8s.io/json",
+		"project": "k8s.io/utils/lru",
 		"licenses": [
 			{
 				"type": "Apache License 2.0",
-				"confidence": 0.9617021276595744
+				"confidence": 1
+			}
+		]
+	},
+	{
+		"project": "k8s.io/utils/third_party/forked/golang/btree",
+		"licenses": [
+			{
+				"type": "Apache License 2.0",
+				"confidence": 1
 			}
 		]
 	},
@@ -723,21 +844,12 @@
 		"project": "sigs.k8s.io/yaml",
 		"licenses": [
 			{
-				"type": "BSD 3-clause \"New\" or \"Revised\" License",
-				"confidence": 1
-			}
-		]
-	},
-	{
-		"project": "sigs.k8s.io/yaml/goyaml.v2",
-		"licenses": [
-			{
 				"type": "Apache License 2.0",
 				"confidence": 1
 			},
 			{
-				"type": "MIT License",
-				"confidence": 0.8975609756097561
+				"type": "BSD 3-clause \"New\" or \"Revised\" License",
+				"confidence": 1
 			}
 		]
 	}

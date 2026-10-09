@@ -18,6 +18,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"google.golang.org/protobuf/proto"
+
 	"go.etcd.io/etcd/server/v3/lease/leasepb"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 )
@@ -30,7 +32,7 @@ func MustUnsafeGetAllLeases(tx backend.UnsafeReader) []*leasepb.Lease {
 	ls := make([]*leasepb.Lease, 0)
 	err := tx.UnsafeForEach(Lease, func(k, v []byte) error {
 		var lpb leasepb.Lease
-		err := lpb.Unmarshal(v)
+		err := proto.Unmarshal(v, &lpb)
 		if err != nil {
 			return fmt.Errorf("failed to Unmarshal lease proto item; lease ID=%016x", bytesToLeaseID(k))
 		}
@@ -44,9 +46,9 @@ func MustUnsafeGetAllLeases(tx backend.UnsafeReader) []*leasepb.Lease {
 }
 
 func MustUnsafePutLease(tx backend.UnsafeWriter, lpb *leasepb.Lease) {
-	key := leaseIdToBytes(lpb.ID)
+	key := leaseIDToBytes(lpb.ID)
 
-	val, err := lpb.Marshal()
+	val, err := proto.Marshal(lpb)
 	if err != nil {
 		panic("failed to marshal lease proto item")
 	}
@@ -54,23 +56,23 @@ func MustUnsafePutLease(tx backend.UnsafeWriter, lpb *leasepb.Lease) {
 }
 
 func UnsafeDeleteLease(tx backend.UnsafeWriter, lpb *leasepb.Lease) {
-	tx.UnsafeDelete(Lease, leaseIdToBytes(lpb.ID))
+	tx.UnsafeDelete(Lease, leaseIDToBytes(lpb.ID))
 }
 
 func MustUnsafeGetLease(tx backend.UnsafeReader, leaseID int64) *leasepb.Lease {
-	_, vs := tx.UnsafeRange(Lease, leaseIdToBytes(leaseID), nil, 0)
+	_, vs := tx.UnsafeRange(Lease, leaseIDToBytes(leaseID), nil, 0)
 	if len(vs) != 1 {
 		return nil
 	}
 	var lpb leasepb.Lease
-	err := lpb.Unmarshal(vs[0])
+	err := proto.Unmarshal(vs[0], &lpb)
 	if err != nil {
 		panic("failed to unmarshal lease proto item")
 	}
 	return &lpb
 }
 
-func leaseIdToBytes(n int64) []byte {
+func leaseIDToBytes(n int64) []byte {
 	bytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(bytes, uint64(n))
 	return bytes

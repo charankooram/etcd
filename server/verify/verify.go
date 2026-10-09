@@ -29,7 +29,7 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 )
 
-const ENV_VERIFY_VALUE_STORAGE_WAL verify.VerificationType = "storage_wal"
+const envVerifyValueStorageWAL verify.VerificationType = "storage_wal"
 
 type Config struct {
 	// DataDir is a root directory where the data being verified are stored.
@@ -77,7 +77,7 @@ func Verify(cfg Config) (retErr error) {
 	be := backend.NewDefaultBackend(lg, datadir.ToBackendFileName(cfg.DataDir))
 	defer be.Close()
 
-	snapshot, hardstate, err := validateWal(cfg)
+	snapshot, hardstate, err := validateWAL(cfg)
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func Verify(cfg Config) (retErr error) {
 // VerifyIfEnabled performs verification according to ETCD_VERIFY env settings.
 // See Verify for more information.
 func VerifyIfEnabled(cfg Config) error {
-	if verify.IsVerificationEnabled(ENV_VERIFY_VALUE_STORAGE_WAL) {
+	if verify.IsVerificationEnabled(envVerifyValueStorageWAL) {
 		return Verify(cfg)
 	}
 	return nil
@@ -110,29 +110,29 @@ func MustVerifyIfEnabled(cfg Config) {
 
 func validateConsistentIndex(cfg Config, hardstate *raftpb.HardState, snapshot *walpb.Snapshot, be backend.Backend) error {
 	index, term := schema.ReadConsistentIndex(be.ReadTx())
-	if cfg.ExactIndex && index != hardstate.Commit {
-		return fmt.Errorf("backend.ConsistentIndex (%v) expected == WAL.HardState.commit (%v)", index, hardstate.Commit)
+	if cfg.ExactIndex && index != hardstate.GetCommit() {
+		return fmt.Errorf("backend.ConsistentIndex (%v) expected == WAL.HardState.commit (%v)", index, hardstate.GetCommit())
 	}
-	if cfg.ExactIndex && term != hardstate.Term {
-		return fmt.Errorf("backend.Term (%v) expected == WAL.HardState.term, (%v)", term, hardstate.Term)
+	if cfg.ExactIndex && term != hardstate.GetTerm() {
+		return fmt.Errorf("backend.Term (%v) expected == WAL.HardState.term, (%v)", term, hardstate.GetTerm())
 	}
-	if index > hardstate.Commit {
-		return fmt.Errorf("backend.ConsistentIndex (%v) must be <= WAL.HardState.commit (%v)", index, hardstate.Commit)
+	if index > hardstate.GetCommit() {
+		return fmt.Errorf("backend.ConsistentIndex (%v) must be <= WAL.HardState.commit (%v)", index, hardstate.GetCommit())
 	}
-	if term > hardstate.Term {
-		return fmt.Errorf("backend.Term (%v) must be <= WAL.HardState.term, (%v)", term, hardstate.Term)
-	}
-
-	if index < snapshot.Index {
-		return fmt.Errorf("backend.ConsistentIndex (%v) must be >= last snapshot index (%v)", index, snapshot.Index)
+	if term > hardstate.GetTerm() {
+		return fmt.Errorf("backend.Term (%v) must be <= WAL.HardState.term, (%v)", term, hardstate.GetTerm())
 	}
 
-	cfg.Logger.Info("verification: consistentIndex OK", zap.Uint64("backend-consistent-index", index), zap.Uint64("hardstate-commit", hardstate.Commit))
+	if index < snapshot.GetIndex() {
+		return fmt.Errorf("backend.ConsistentIndex (%v) must be >= last snapshot index (%v)", index, snapshot.GetIndex())
+	}
+
+	cfg.Logger.Info("verification: consistentIndex OK", zap.Uint64("backend-consistent-index", index), zap.Uint64("hardstate-commit", hardstate.GetCommit()))
 	return nil
 }
 
-func validateWal(cfg Config) (*walpb.Snapshot, *raftpb.HardState, error) {
-	walDir := datadir.ToWalDir(cfg.DataDir)
+func validateWAL(cfg Config) (*walpb.Snapshot, *raftpb.HardState, error) {
+	walDir := datadir.ToWALDir(cfg.DataDir)
 
 	walSnaps, err := wal2.ValidSnapshotEntries(cfg.Logger, walDir)
 	if err != nil {
@@ -144,5 +144,5 @@ func validateWal(cfg Config) (*walpb.Snapshot, *raftpb.HardState, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return &snapshot, hardstate, nil
+	return snapshot, hardstate, nil
 }

@@ -30,12 +30,10 @@ func TestCurlV3MaintenanceAlarmMissiongAlarm(t *testing.T) {
 }
 
 func testCurlV3MaintenanceAlarmMissiongAlarm(cx ctlCtx) {
-	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{
+	require.NoErrorf(cx.t, e2e.CURLPost(cx.epc, e2e.CURLReq{
 		Endpoint: "/v3/maintenance/alarm",
 		Value:    `{"action": "ACTIVATE"}`,
-	}); err != nil {
-		cx.t.Fatalf("failed post maintenance alarm (%v)", err)
-	}
+	}), "failed post maintenance alarm")
 }
 
 func TestCurlV3MaintenanceStatus(t *testing.T) {
@@ -48,7 +46,7 @@ func testCurlV3MaintenanceStatus(cx ctlCtx) {
 		Endpoint: "/v3/maintenance/status",
 		Value:    "{}",
 	})
-	resp, err := runCommandAndReadJsonOutput(args)
+	resp, err := runCommandAndReadJSONOutput(args)
 	require.NoError(cx.t, err)
 
 	requiredFields := []string{"version", "dbSize", "leader", "raftIndex", "raftTerm", "raftAppliedIndex", "dbSizeInUse", "storageVersion"}
@@ -58,8 +56,7 @@ func testCurlV3MaintenanceStatus(cx ctlCtx) {
 		}
 	}
 
-	actualVersion, _ := resp["version"]
-	require.Equal(cx.t, version.Version, actualVersion)
+	require.Equal(cx.t, version.Version, resp["version"])
 }
 
 func TestCurlV3MaintenanceDefragment(t *testing.T) {
@@ -67,15 +64,15 @@ func TestCurlV3MaintenanceDefragment(t *testing.T) {
 }
 
 func testCurlV3MaintenanceDefragment(cx ctlCtx) {
-	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{
+	require.NoErrorf(cx.t, e2e.CURLPost(cx.epc, e2e.CURLReq{
 		Endpoint: "/v3/maintenance/defragment",
 		Value:    "{}",
 		Expected: expect.ExpectedResponse{
-			Value: "{}",
+			// DefragmentResponse carries a populated response header
+			// (including leader_id), so the body is no longer "{}".
+			Value: `"leader_id"`,
 		},
-	}); err != nil {
-		cx.t.Fatalf("failed post maintenance defragment request: (%v)", err)
-	}
+	}), "failed post maintenance defragment request")
 }
 
 func TestCurlV3MaintenanceHash(t *testing.T) {
@@ -88,7 +85,7 @@ func testCurlV3MaintenanceHash(cx ctlCtx) {
 		Endpoint: "/v3/maintenance/hash",
 		Value:    "{}",
 	})
-	resp, err := runCommandAndReadJsonOutput(args)
+	resp, err := runCommandAndReadJSONOutput(args)
 	require.NoError(cx.t, err)
 
 	requiredFields := []string{"header", "hash"}
@@ -109,7 +106,7 @@ func testCurlV3MaintenanceHashKV(cx ctlCtx) {
 		Endpoint: "/v3/maintenance/hashkv",
 		Value:    "{}",
 	})
-	resp, err := runCommandAndReadJsonOutput(args)
+	resp, err := runCommandAndReadJSONOutput(args)
 	require.NoError(cx.t, err)
 
 	requiredFields := []string{"header", "hash", "compact_revision", "hash_revision"}
@@ -125,15 +122,14 @@ func TestCurlV3MaintenanceSnapshot(t *testing.T) {
 }
 
 func testCurlV3MaintenanceSnapshot(cx ctlCtx) {
-	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{
+	require.NoErrorf(cx.t, e2e.CURLPost(cx.epc, e2e.CURLReq{
 		Endpoint: "/v3/maintenance/snapshot",
 		Value:    "{}",
 		Expected: expect.ExpectedResponse{
-			Value: `"result":{"blob":`,
+			Value:         `"result":\{"header":\{[^}]*"leader_id":"[1-9][0-9]*"[^}]*\},"blob":`,
+			IsRegularExpr: true,
 		},
-	}); err != nil {
-		cx.t.Fatalf("failed post maintenance snapshot request: (%v)", err)
-	}
+	}), "failed post maintenance snapshot request")
 }
 
 func TestCurlV3MaintenanceMoveleader(t *testing.T) {
@@ -141,15 +137,13 @@ func TestCurlV3MaintenanceMoveleader(t *testing.T) {
 }
 
 func testCurlV3MaintenanceMoveleader(cx ctlCtx) {
-	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{
+	require.NoErrorf(cx.t, e2e.CURLPost(cx.epc, e2e.CURLReq{
 		Endpoint: "/v3/maintenance/transfer-leadership",
 		Value:    `{"targetID": 123}`,
 		Expected: expect.ExpectedResponse{
 			Value: `"message":"etcdserver: bad leader transferee"`,
 		},
-	}); err != nil {
-		cx.t.Fatalf("failed post maintenance moveleader request: (%v)", err)
-	}
+	}), "failed post maintenance moveleader request")
 }
 
 func TestCurlV3MaintenanceDowngrade(t *testing.T) {
@@ -157,13 +151,11 @@ func TestCurlV3MaintenanceDowngrade(t *testing.T) {
 }
 
 func testCurlV3MaintenanceDowngrade(cx ctlCtx) {
-	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{
+	require.NoErrorf(cx.t, e2e.CURLPost(cx.epc, e2e.CURLReq{
 		Endpoint: "/v3/maintenance/downgrade",
 		Value:    `{"action": 0, "version": "3.0"}`,
 		Expected: expect.ExpectedResponse{
 			Value: `"message":"etcdserver: invalid downgrade target version"`,
 		},
-	}); err != nil {
-		cx.t.Fatalf("failed post maintenance downgrade request: (%v)", err)
-	}
+	}), "failed post maintenance downgrade request")
 }

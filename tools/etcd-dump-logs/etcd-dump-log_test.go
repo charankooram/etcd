@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/api/v3/authpb"
@@ -36,9 +37,7 @@ import (
 func TestEtcdDumpLogEntryType(t *testing.T) {
 	// directory where the command is
 	binDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// TODO(ptabor): The test does not run by default from ./scripts/test.sh.
 	dumpLogsBinary := path.Join(binDir + "/etcd-dump-logs")
@@ -51,7 +50,7 @@ func TestEtcdDumpLogEntryType(t *testing.T) {
 
 	p := t.TempDir()
 
-	mustCreateWalLog(t, p)
+	mustCreateWALLog(t, p)
 
 	argtests := []struct {
 		name         string
@@ -75,112 +74,78 @@ func TestEtcdDumpLogEntryType(t *testing.T) {
 		{"decoder_wrongoutputformat", []string{"-stream-decoder", decoderWrongOutputFormat, p}, "expectedoutput/decoder_wrongoutputformat.output"},
 	}
 
-	for _, argtest := range argtests {
+	for i := range argtests {
+		argtest := &argtests[i]
 		t.Run(argtest.name, func(t *testing.T) {
 			cmd := exec.Command(dumpLogsBinary, argtest.args...)
 			actual, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			expected, err := os.ReadFile(path.Join(binDir, argtest.fileExpected))
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
-			assert.EqualValues(t, string(expected), string(actual))
+			assert.Equal(t, string(expected), string(actual))
 			// The output files contains a lot of trailing whitespaces... difficult to diagnose without printing them explicitly.
 			// TODO(ptabor): Get rid of the whitespaces both in code and the test-files.
-			assert.EqualValues(t, strings.ReplaceAll(string(expected), " ", "_"), strings.ReplaceAll(string(actual), " ", "_"))
+			assert.Equal(t, strings.ReplaceAll(string(expected), " ", "_"), strings.ReplaceAll(string(actual), " ", "_"))
 		})
 	}
-
 }
 
-func mustCreateWalLog(t *testing.T, path string) {
+func mustCreateWALLog(t *testing.T, path string) {
 	memberdir := filepath.Join(path, "member")
-	err := os.Mkdir(memberdir, 0744)
-	if err != nil {
-		t.Fatal(err)
-	}
+	err := os.Mkdir(memberdir, 0o744)
+	require.NoError(t, err)
 	waldir := walDir(path)
 	snapdir := snapDir(path)
 
 	w, err := wal.Create(zaptest.NewLogger(t), waldir, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	err = os.Mkdir(snapdir, 0744)
-	if err != nil {
-		t.Fatal(err)
-	}
+	err = os.Mkdir(snapdir, 0o744)
+	require.NoError(t, err)
 
-	ents := make([]raftpb.Entry, 0)
+	ents := make([]*raftpb.Entry, 0)
 
 	// append entries into wal log
 	appendConfigChangeEnts(&ents)
-	appendNormalRequestEnts(&ents)
 	appendNormalIRREnts(&ents)
 	appendUnknownNormalEnts(&ents)
 
 	// force commit newly appended entries
-	err = w.Save(raftpb.HardState{}, ents)
-	if err != nil {
-		t.Fatal(err)
-	}
+	err = w.Save(&raftpb.HardState{}, ents)
+	require.NoError(t, err)
 	w.Close()
 }
 
-func appendConfigChangeEnts(ents *[]raftpb.Entry) {
+func appendConfigChangeEnts(ents *[]*raftpb.Entry) {
 	configChangeData := []raftpb.ConfChange{
-		{ID: 1, Type: raftpb.ConfChangeAddNode, NodeID: 2, Context: []byte("")},
-		{ID: 2, Type: raftpb.ConfChangeRemoveNode, NodeID: 2, Context: []byte("")},
-		{ID: 3, Type: raftpb.ConfChangeUpdateNode, NodeID: 2, Context: []byte("")},
-		{ID: 4, Type: raftpb.ConfChangeAddLearnerNode, NodeID: 3, Context: []byte("")},
+		{Id: new(uint64(1)), Type: raftpb.ConfChangeAddNode.Enum(), NodeId: new(uint64(2)), Context: []byte("")},
+		{Id: new(uint64(2)), Type: raftpb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(2)), Context: []byte("")},
+		{Id: new(uint64(3)), Type: raftpb.ConfChangeUpdateNode.Enum(), NodeId: new(uint64(2)), Context: []byte("")},
+		{Id: new(uint64(4)), Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: new(uint64(3)), Context: []byte("")},
 	}
-	configChangeEntries := []raftpb.Entry{
-		{Term: 1, Index: 1, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(&configChangeData[0])},
-		{Term: 2, Index: 2, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(&configChangeData[1])},
-		{Term: 2, Index: 3, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(&configChangeData[2])},
-		{Term: 2, Index: 4, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(&configChangeData[3])},
+	configChangeEntries := []*raftpb.Entry{
+		{Term: new(uint64(1)), Index: new(uint64(1)), Type: raftpb.EntryConfChange.Enum(), Data: pbutil.MustMarshalMessage(&configChangeData[0])},
+		{Term: new(uint64(2)), Index: new(uint64(2)), Type: raftpb.EntryConfChange.Enum(), Data: pbutil.MustMarshalMessage(&configChangeData[1])},
+		{Term: new(uint64(2)), Index: new(uint64(3)), Type: raftpb.EntryConfChange.Enum(), Data: pbutil.MustMarshalMessage(&configChangeData[2])},
+		{Term: new(uint64(2)), Index: new(uint64(4)), Type: raftpb.EntryConfChange.Enum(), Data: pbutil.MustMarshalMessage(&configChangeData[3])},
 	}
 	*ents = append(*ents, configChangeEntries...)
 }
 
-func appendNormalRequestEnts(ents *[]raftpb.Entry) {
-	a := true
-	b := false
-
-	requests := []etcdserverpb.Request{
-		{ID: 0, Method: "", Path: "/path0", Val: "{\"hey\":\"ho\",\"hi\":[\"yo\"]}", Dir: true, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 9, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 1, Method: "QGET", Path: "/path1", Val: "{\"0\":\"1\",\"2\":[\"3\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 9, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 2, Method: "SYNC", Path: "/path2", Val: "{\"0\":\"1\",\"2\":[\"3\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 2, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 3, Method: "DELETE", Path: "/path3", Val: "{\"hey\":\"ho\",\"hi\":[\"yo\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &a, Expiration: 2, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 4, Method: "RANDOM", Path: "/path4/superlong" + strings.Repeat("/path", 30), Val: "{\"hey\":\"ho\",\"hi\":[\"yo\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 2, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-	}
-
-	for i, request := range requests {
-		var currentry raftpb.Entry
-		currentry.Term = 3
-		currentry.Index = uint64(i + 5)
-		currentry.Type = raftpb.EntryNormal
-		currentry.Data = pbutil.MustMarshal(&request)
-		*ents = append(*ents, currentry)
-	}
-}
-
-func appendNormalIRREnts(ents *[]raftpb.Entry) {
+func appendNormalIRREnts(ents *[]*raftpb.Entry) {
 	irrrange := &etcdserverpb.RangeRequest{Key: []byte("1"), RangeEnd: []byte("hi"), Limit: 6, Revision: 1, SortOrder: 1, SortTarget: 0, Serializable: false, KeysOnly: false, CountOnly: false, MinModRevision: 0, MaxModRevision: 20000, MinCreateRevision: 0, MaxCreateRevision: 20000}
 
 	irrput := &etcdserverpb.PutRequest{Key: []byte("foo1"), Value: []byte("bar1"), Lease: 1, PrevKv: false, IgnoreValue: false, IgnoreLease: true}
 
 	irrdeleterange := &etcdserverpb.DeleteRangeRequest{Key: []byte("0"), RangeEnd: []byte("9"), PrevKv: true}
 
-	delInRangeReq := &etcdserverpb.RequestOp{Request: &etcdserverpb.RequestOp_RequestDeleteRange{
-		RequestDeleteRange: &etcdserverpb.DeleteRangeRequest{
-			Key: []byte("a"), RangeEnd: []byte("b"),
+	delInRangeReq := &etcdserverpb.RequestOp{
+		Request: &etcdserverpb.RequestOp_RequestDeleteRange{
+			RequestDeleteRange: &etcdserverpb.DeleteRangeRequest{
+				Key: []byte("a"), RangeEnd: []byte("b"),
+			},
 		},
-	},
 	}
 
 	irrtxn := &etcdserverpb.TxnRequest{Success: []*etcdserverpb.RequestOp{delInRangeReq}, Failure: []*etcdserverpb.RequestOp{delInRangeReq}}
@@ -222,7 +187,7 @@ func appendNormalIRREnts(ents *[]raftpb.Entry) {
 	irrauthroleget := &etcdserverpb.AuthRoleGetRequest{Role: "role3"}
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("Keys"),
 		RangeEnd: []byte("RangeEnd"),
 	}
@@ -231,7 +196,7 @@ func appendNormalIRREnts(ents *[]raftpb.Entry) {
 
 	irrauthrolerevokepermission := &etcdserverpb.AuthRoleRevokePermissionRequest{Role: "role3", Key: []byte("key"), RangeEnd: []byte("rangeend")}
 
-	irrs := []etcdserverpb.InternalRaftRequest{
+	irrs := []*etcdserverpb.InternalRaftRequest{
 		{ID: 5, Range: irrrange},
 		{ID: 6, Put: irrput},
 		{ID: 7, DeleteRange: irrdeleterange},
@@ -260,19 +225,19 @@ func appendNormalIRREnts(ents *[]raftpb.Entry) {
 
 	for i, irr := range irrs {
 		var currentry raftpb.Entry
-		currentry.Term = uint64(i + 4)
-		currentry.Index = uint64(i + 10)
-		currentry.Type = raftpb.EntryNormal
-		currentry.Data = pbutil.MustMarshal(&irr)
-		*ents = append(*ents, currentry)
+		currentry.Term = new(uint64(i + 4))
+		currentry.Index = new(uint64(i + 10))
+		currentry.Type = raftpb.EntryNormal.Enum()
+		currentry.Data = pbutil.MustMarshalMessage(irr)
+		*ents = append(*ents, &currentry)
 	}
 }
 
-func appendUnknownNormalEnts(ents *[]raftpb.Entry) {
+func appendUnknownNormalEnts(ents *[]*raftpb.Entry) {
 	var currentry raftpb.Entry
-	currentry.Term = 27
-	currentry.Index = 34
-	currentry.Type = raftpb.EntryNormal
+	currentry.Term = new(uint64(27))
+	currentry.Index = new(uint64(34))
+	currentry.Type = raftpb.EntryNormal.Enum()
 	currentry.Data = []byte("?")
-	*ents = append(*ents, currentry)
+	*ents = append(*ents, &currentry)
 }

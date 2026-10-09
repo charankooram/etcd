@@ -18,19 +18,28 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/storage/mvcc/testutil"
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
-var tokenTTL = time.Second
-var defaultAuthToken = fmt.Sprintf("jwt,pub-key=%s,priv-key=%s,sign-method=RS256,ttl=%s",
-	mustAbsPath("../fixtures/server.crt"), mustAbsPath("../fixtures/server.key.insecure"), tokenTTL)
+var (
+	tokenTTL         = time.Second * 3
+	defaultAuthToken = fmt.Sprintf("jwt,pub-key=%s,priv-key=%s,sign-method=RS256,ttl=%s",
+		mustAbsPath("../fixtures/server.crt"), mustAbsPath("../fixtures/server.key.insecure"), tokenTTL)
+	defaultKeyPath    = mustAbsPath("../fixtures/server.key.insecure")
+	verifyJWTOnlyAuth = fmt.Sprintf("jwt,pub-key=%s,sign-method=RS256,ttl=%s",
+		mustAbsPath("../fixtures/server.crt"), tokenTTL)
+)
 
 const (
 	PermissionDenied      = "etcdserver: permission denied"
@@ -42,7 +51,7 @@ const (
 
 func TestAuthEnable(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -54,37 +63,41 @@ func TestAuthEnable(t *testing.T) {
 
 func TestAuthDisable(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
-		require.NoError(t, cc.Put(ctx, "hoo", "a", config.PutOptions{}))
+		_, err := cc.Put(ctx, "hoo", "a", config.PutOptions{})
+		require.NoError(t, err)
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 
 		// test-user doesn't have the permission, it must fail
-		require.Error(t, testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.Error(t, err)
 		require.NoErrorf(t, rootAuthClient.AuthDisable(ctx), "failed to disable auth")
 		// now ErrAuthNotEnabled of Authenticate() is simply ignored
-		require.NoError(t, testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// now the key can be accessed
-		require.NoError(t, cc.Put(ctx, "hoo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err := cc.Get(ctx, "hoo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "hoo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'hoo', 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'hoo', 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "hoo", string(resp.Kvs[0].Key), "want key value pair 'hoo', 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'hoo', 'bar' but got %+v", resp.Kvs)
 	})
 }
 
 func TestAuthGracefulDisable(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -94,8 +107,10 @@ func TestAuthGracefulDisable(t *testing.T) {
 		donec := make(chan struct{})
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 
+		startedC := make(chan struct{}, 1)
 		go func() {
 			defer close(donec)
+			defer close(startedC)
 			// sleep a bit to let the watcher connects while auth is still enabled
 			time.Sleep(time.Second)
 			// now disable auth...
@@ -109,9 +124,13 @@ func TestAuthGracefulDisable(t *testing.T) {
 				t.Errorf("failed to restart member %v", err)
 				return
 			}
+			startedC <- struct{}{}
 			// the watcher should still work after reconnecting
-			require.NoErrorf(t, rootAuthClient.Put(ctx, "key", "value", config.PutOptions{}), "failed to put key value")
+			_, err := rootAuthClient.Put(ctx, "key", "value", config.PutOptions{})
+			assert.NoErrorf(t, err, "failed to put key value")
 		}()
+
+		<-startedC
 
 		wCtx, wCancel := context.WithCancel(ctx)
 		defer wCancel()
@@ -129,7 +148,7 @@ func TestAuthGracefulDisable(t *testing.T) {
 
 func TestAuthStatus(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -149,97 +168,105 @@ func TestAuthStatus(t *testing.T) {
 
 func TestAuthRoleUpdate(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
-		require.NoError(t, cc.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err := cc.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 
-		require.ErrorContains(t, testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{}), PermissionDenied)
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.ErrorContains(t, err, PermissionDenied)
 		// grant a new key
-		_, err := rootAuthClient.RoleGrantPermission(ctx, testRoleName, "hoo", "", clientv3.PermissionType(clientv3.PermReadWrite))
+		_, err = rootAuthClient.RoleGrantPermission(ctx, testRoleName, "hoo", "", clientv3.PermissionType(clientv3.PermReadWrite))
 		require.NoError(t, err)
 		// try a newly granted key
-		require.NoError(t, testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err := testUserAuthClient.Get(ctx, "hoo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "hoo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "hoo", string(resp.Kvs[0].Key), "want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
 		// revoke the newly granted key
 		_, err = rootAuthClient.RoleRevokePermission(ctx, testRoleName, "hoo", "")
 		require.NoError(t, err)
 		// try put to the revoked key
-		require.ErrorContains(t, testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{}), PermissionDenied)
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.ErrorContains(t, err, PermissionDenied)
 		// confirm a key still granted can be accessed
 		resp, err = testUserAuthClient.Get(ctx, "foo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "foo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "foo", string(resp.Kvs[0].Key), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
 	})
 }
 
 func TestAuthUserDeleteDuringOps(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
-		require.NoError(t, cc.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err := cc.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 
 		// create a key
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err := testUserAuthClient.Get(ctx, "foo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "foo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "foo", string(resp.Kvs[0].Key), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
 		// delete the user
 		_, err = rootAuthClient.UserDelete(ctx, testUserName)
 		require.NoError(t, err)
 		// check the user is deleted
-		err = testUserAuthClient.Put(ctx, "foo", "baz", config.PutOptions{})
+		_, err = testUserAuthClient.Put(ctx, "foo", "baz", config.PutOptions{})
 		require.ErrorContains(t, err, AuthenticationFailed)
 	})
 }
 
 func TestAuthRoleRevokeDuringOps(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
-		require.NoError(t, cc.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err := cc.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 
 		// create a key
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err := testUserAuthClient.Get(ctx, "foo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "foo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "foo", string(resp.Kvs[0].Key), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
 		// create a new role
 		_, err = rootAuthClient.RoleAdd(ctx, "test-role2")
 		require.NoError(t, err)
@@ -251,63 +278,69 @@ func TestAuthRoleRevokeDuringOps(t *testing.T) {
 		require.NoError(t, err)
 
 		// try a newly granted key
-		require.NoError(t, testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err = testUserAuthClient.Get(ctx, "hoo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "hoo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "hoo", string(resp.Kvs[0].Key), "want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'hoo' 'bar' but got %+v", resp.Kvs)
 		// revoke a role from the user
 		_, err = rootAuthClient.UserRevokeRole(ctx, testUserName, testRoleName)
 		require.NoError(t, err)
 		// check the role is revoked and permission is lost from the user
-		require.ErrorContains(t, testUserAuthClient.Put(ctx, "foo", "baz", config.PutOptions{}), PermissionDenied)
+		_, err = testUserAuthClient.Put(ctx, "foo", "baz", config.PutOptions{})
+		require.ErrorContains(t, err, PermissionDenied)
 
 		// try a key that can be accessed from the remaining role
-		require.NoError(t, testUserAuthClient.Put(ctx, "hoo", "bar2", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "hoo", "bar2", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err = testUserAuthClient.Get(ctx, "hoo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "hoo" || string(resp.Kvs[0].Value) != "bar2" {
-			t.Fatalf("want key value pair 'hoo' 'bar2' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'hoo' 'bar2' but got %+v", resp.Kvs)
+		require.Equalf(t, "hoo", string(resp.Kvs[0].Key), "want key value pair 'hoo' 'bar2' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar2", string(resp.Kvs[0].Value), "want key value pair 'hoo' 'bar2' but got %+v", resp.Kvs)
 	})
 }
 
 func TestAuthWriteKey(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
-		require.NoError(t, cc.Put(ctx, "foo", "a", config.PutOptions{}))
+		_, err := cc.Put(ctx, "foo", "a", config.PutOptions{})
+		require.NoError(t, err)
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 
 		// confirm root role can access to all keys
-		require.NoError(t, rootAuthClient.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err = rootAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		resp, err := rootAuthClient.Get(ctx, "foo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "foo" || string(resp.Kvs[0].Value) != "bar" {
-			t.Fatalf("want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "foo", string(resp.Kvs[0].Key), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar", string(resp.Kvs[0].Value), "want key value pair 'foo' 'bar' but got %+v", resp.Kvs)
 		// try invalid user
 		_, err = clus.Client(WithAuth("a", "b"))
 		require.ErrorContains(t, err, AuthenticationFailed)
 
 		// try good user
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar2", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar2", config.PutOptions{})
+		require.NoError(t, err)
 		// confirm put succeeded
 		resp, err = testUserAuthClient.Get(ctx, "foo", config.GetOptions{})
 		require.NoError(t, err)
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Key) != "foo" || string(resp.Kvs[0].Value) != "bar2" {
-			t.Fatalf("want key value pair 'foo' 'bar2' but got %+v", resp.Kvs)
-		}
+		require.Lenf(t, resp.Kvs, 1, "want key value pair 'foo' 'bar2' but got %+v", resp.Kvs)
+		require.Equalf(t, "foo", string(resp.Kvs[0].Key), "want key value pair 'foo' 'bar2' but got %+v", resp.Kvs)
+		require.Equalf(t, "bar2", string(resp.Kvs[0].Value), "want key value pair 'foo' 'bar2' but got %+v", resp.Kvs)
 
 		// try bad password
 		_, err = clus.Client(WithAuth(testUserName, "badpass"))
@@ -367,7 +400,7 @@ func TestAuthTxn(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			testRunner.BeforeTest(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.cfg))
 			defer clus.Close()
@@ -378,14 +411,12 @@ func TestAuthTxn(t *testing.T) {
 				// keys with 2 suffix are granted to test-user, see Line 399
 				grantedKeys := []string{"c2", "s2", "f2"}
 				for _, key := range keys {
-					if err := cc.Put(ctx, key, "v", config.PutOptions{}); err != nil {
-						t.Fatal(err)
-					}
+					_, err := cc.Put(ctx, key, "v", config.PutOptions{})
+					require.NoError(t, err)
 				}
 				for _, key := range grantedKeys {
-					if err := cc.Put(ctx, key, "v", config.PutOptions{}); err != nil {
-						t.Fatal(err)
-					}
+					_, err := cc.Put(ctx, key, "v", config.PutOptions{})
+					require.NoError(t, err)
 				}
 
 				require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
@@ -394,16 +425,15 @@ func TestAuthTxn(t *testing.T) {
 
 				// grant keys to test-user
 				for _, key := range grantedKeys {
-					if _, err := rootAuthClient.RoleGrantPermission(ctx, testRoleName, key, "", clientv3.PermissionType(clientv3.PermReadWrite)); err != nil {
-						t.Fatal(err)
-					}
+					_, err := rootAuthClient.RoleGrantPermission(ctx, testRoleName, key, "", clientv3.PermissionType(clientv3.PermReadWrite))
+					require.NoError(t, err)
 				}
 				for _, req := range reqs {
 					resp, err := testUserAuthClient.Txn(ctx, req.compare, req.ifSuccess, req.ifFail, config.TxnOptions{
 						Interactive: true,
 					})
 					if req.expectError {
-						require.Contains(t, err.Error(), req.expectResults[0])
+						require.ErrorContains(t, err, req.expectResults[0])
 					} else {
 						require.NoError(t, err)
 						require.Equal(t, req.expectResults, getRespValues(resp))
@@ -416,7 +446,7 @@ func TestAuthTxn(t *testing.T) {
 
 func TestAuthPrefixPerm(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -432,10 +462,12 @@ func TestAuthPrefixPerm(t *testing.T) {
 		// try a prefix granted permission
 		for i := 0; i < 10; i++ {
 			key := fmt.Sprintf("%s%d", prefix, i)
-			require.NoError(t, testUserAuthClient.Put(ctx, key, "val", config.PutOptions{}))
+			_, err = testUserAuthClient.Put(ctx, key, "val", config.PutOptions{})
+			require.NoError(t, err)
 		}
 		// expect put 'key with prefix end "/prefix0"' value failed
-		require.ErrorContains(t, testUserAuthClient.Put(ctx, clientv3.GetPrefixRangeEnd(prefix), "baz", config.PutOptions{}), PermissionDenied)
+		_, err = testUserAuthClient.Put(ctx, clientv3.GetPrefixRangeEnd(prefix), "baz", config.PutOptions{})
+		require.ErrorContains(t, err, PermissionDenied)
 
 		// grant the prefix2 keys to test-user
 		prefix2 := "/prefix2/"
@@ -443,14 +475,15 @@ func TestAuthPrefixPerm(t *testing.T) {
 		require.NoError(t, err)
 		for i := 0; i < 10; i++ {
 			key := fmt.Sprintf("%s%d", prefix2, i)
-			require.NoError(t, testUserAuthClient.Put(ctx, key, "val", config.PutOptions{}))
+			_, err = testUserAuthClient.Put(ctx, key, "val", config.PutOptions{})
+			require.NoError(t, err)
 		}
 	})
 }
 
 func TestAuthLeaseKeepAlive(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -462,21 +495,22 @@ func TestAuthLeaseKeepAlive(t *testing.T) {
 		resp, err := rootAuthClient.Grant(ctx, 10)
 		require.NoError(t, err)
 		leaseID := resp.ID
-		require.NoError(t, rootAuthClient.Put(ctx, "key", "value", config.PutOptions{LeaseID: leaseID}))
+		_, err = rootAuthClient.Put(ctx, "key", "value", config.PutOptions{LeaseID: leaseID})
+		require.NoError(t, err)
 		_, err = rootAuthClient.KeepAliveOnce(ctx, leaseID)
 		require.NoError(t, err)
 
 		gresp, err := rootAuthClient.Get(ctx, "key", config.GetOptions{})
 		require.NoError(t, err)
-		if len(gresp.Kvs) != 1 || string(gresp.Kvs[0].Key) != "key" || string(gresp.Kvs[0].Value) != "value" {
-			t.Fatalf("want kv pair ('key', 'value') but got %v", gresp.Kvs)
-		}
+		require.Lenf(t, gresp.Kvs, 1, "want kv pair ('key', 'value') but got %v", gresp.Kvs)
+		require.Equalf(t, "key", string(gresp.Kvs[0].Key), "want kv pair ('key', 'value') but got %v", gresp.Kvs)
+		require.Equalf(t, "value", string(gresp.Kvs[0].Value), "want kv pair ('key', 'value') but got %v", gresp.Kvs)
 	})
 }
 
 func TestAuthRevokeWithDelete(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -507,7 +541,7 @@ func TestAuthRevokeWithDelete(t *testing.T) {
 
 func TestAuthLeaseTimeToLiveExpired(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -518,7 +552,8 @@ func TestAuthLeaseTimeToLiveExpired(t *testing.T) {
 		resp, err := rootAuthClient.Grant(ctx, 2)
 		require.NoError(t, err)
 		leaseID := resp.ID
-		require.NoError(t, rootAuthClient.Put(ctx, "key", "val", config.PutOptions{LeaseID: leaseID}))
+		_, err = rootAuthClient.Put(ctx, "key", "val", config.PutOptions{LeaseID: leaseID})
+		require.NoError(t, err)
 		// eliminate false positive
 		time.Sleep(3 * time.Second)
 		tresp, err := rootAuthClient.TimeToLive(ctx, leaseID, config.LeaseOption{})
@@ -545,14 +580,14 @@ func TestAuthLeaseGrantLeases(t *testing.T) {
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
 			cc := testutils.MustClient(clus.Client())
 
 			testutils.ExecuteUntil(ctx, t, func() {
-				require.NoErrorf(t, setupAuth(cc, []authRole{}, []authUser{rootUser}), "failed to enable auth")
+				require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 				rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 
 				resp, err := rootAuthClient.Grant(ctx, 10)
@@ -561,9 +596,16 @@ func TestAuthLeaseGrantLeases(t *testing.T) {
 				leaseID := resp.ID
 				lresp, err := rootAuthClient.Leases(ctx)
 				require.NoError(t, err)
-				if len(lresp.Leases) != 1 || lresp.Leases[0].ID != leaseID {
-					t.Fatalf("want %v leaseID but got %v leases", leaseID, lresp.Leases)
-				}
+				require.Lenf(t, lresp.Leases, 1, "want %v leaseID but got %v leases", leaseID, lresp.Leases)
+				require.Equalf(t, lresp.Leases[0].ID, leaseID, "want %v leaseID but got %v leases", leaseID, lresp.Leases)
+
+				anonAuthClient := testutils.MustClient(clus.Client())
+				_, err = anonAuthClient.Grant(ctx, 10)
+				require.ErrorContains(t, err, "etcdserver: user name is empty")
+
+				testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
+				_, err = testUserAuthClient.Grant(ctx, 10)
+				require.NoError(t, err)
 			})
 		})
 	}
@@ -571,7 +613,7 @@ func TestAuthLeaseGrantLeases(t *testing.T) {
 
 func TestAuthMemberAdd(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -587,9 +629,112 @@ func TestAuthMemberAdd(t *testing.T) {
 	})
 }
 
+func TestAuthCompact(t *testing.T) {
+	testRunner.BeforeTest(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
+	defer clus.Close()
+
+	cc := testutils.MustClient(clus.Client())
+	testutils.ExecuteUntil(ctx, t, func() {
+		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
+		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
+		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
+
+		_, err := rootAuthClient.Put(ctx, "key", "value", config.PutOptions{})
+		require.NoError(t, err)
+
+		_, err = rootAuthClient.Put(ctx, "key", "value", config.PutOptions{})
+		require.NoError(t, err)
+
+		_, err = testUserAuthClient.Compact(ctx, 1, config.CompactOption{Physical: true})
+		require.ErrorContains(t, err, PermissionDenied)
+
+		_, err = rootAuthClient.Compact(ctx, 1, config.CompactOption{Physical: true})
+		require.NoError(t, err)
+	})
+}
+
+func TestAuthLeaseLeases(t *testing.T) {
+	testRunner.BeforeTest(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
+	defer clus.Close()
+
+	cc := testutils.MustClient(clus.Client())
+	testutils.ExecuteUntil(ctx, t, func() {
+		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
+		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
+		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
+		anonAuthClient := testutils.MustClient(clus.Client())
+
+		lresp, err := rootAuthClient.Grant(ctx, 90)
+		require.NoError(t, err)
+		firstLeaseID := lresp.ID
+
+		_, err = rootAuthClient.Put(ctx, "foo", "value", config.PutOptions{LeaseID: firstLeaseID})
+		require.NoError(t, err)
+
+		lresp, err = rootAuthClient.Grant(ctx, 90)
+		require.NoError(t, err)
+		secondLeaseID := lresp.ID
+
+		_, err = rootAuthClient.Put(ctx, "foo1", "value", config.PutOptions{LeaseID: secondLeaseID})
+		require.NoError(t, err)
+
+		_, err = testUserAuthClient.Leases(ctx)
+		require.ErrorContains(t, err, PermissionDenied)
+
+		_, err = anonAuthClient.Leases(ctx)
+		require.ErrorContains(t, err, "etcdserver: user name is empty")
+
+		resp, err := rootAuthClient.Leases(ctx)
+		require.NoError(t, err)
+		require.Lenf(t, resp.Leases, 2, "want 2 leases but got %v", resp.Leases)
+
+		leaseIDs := []clientv3.LeaseID{firstLeaseID, secondLeaseID}
+		for _, lease := range resp.Leases {
+			require.Containsf(t, leaseIDs, lease.ID, "unexpected lease ID %v, want one of %v", lease.ID, leaseIDs)
+		}
+
+		_, err = rootAuthClient.Revoke(ctx, secondLeaseID)
+		require.NoError(t, err)
+
+		_, err = testUserAuthClient.Leases(ctx)
+		require.NoError(t, err)
+	})
+}
+
+func TestAuthMemberList(t *testing.T) {
+	testRunner.BeforeTest(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
+	defer clus.Close()
+	cc := testutils.MustClient(clus.Client())
+	testutils.ExecuteUntil(ctx, t, func() {
+		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
+		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
+		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
+		anonAuthClient := testutils.MustClient(clus.Client())
+
+		_, err := testUserAuthClient.MemberList(ctx, false)
+		require.NoError(t, err)
+
+		_, err = anonAuthClient.MemberList(ctx, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "etcdserver: user name is empty")
+
+		_, err = rootAuthClient.MemberList(ctx, false)
+		require.NoError(t, err)
+	})
+}
+
 func TestAuthMemberRemove(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clusterSize := 3
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: clusterSize}))
@@ -600,36 +745,36 @@ func TestAuthMemberRemove(t *testing.T) {
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
 
-		memberId, clusterId := memberToRemove(ctx, t, rootAuthClient, clusterSize)
-		delete(memberIDToEndpoints, memberId)
+		memberID, clusterID := memberToRemove(ctx, t, rootAuthClient, clusterSize)
+		delete(memberIDToEndpoints, memberID)
 		endpoints := make([]string, 0, len(memberIDToEndpoints))
 		for _, ep := range memberIDToEndpoints {
 			endpoints = append(endpoints, ep)
 		}
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 		// ordinary user cannot remove a member
-		_, err := testUserAuthClient.MemberRemove(ctx, memberId)
+		_, err := testUserAuthClient.MemberRemove(ctx, memberID)
 		require.ErrorContains(t, err, PermissionDenied)
 
 		// root can remove a member, building a client excluding removed member endpoint
 		rootAuthClient2 := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword), WithEndpoints(endpoints)))
-		resp, err := rootAuthClient2.MemberRemove(ctx, memberId)
+		resp, err := rootAuthClient2.MemberRemove(ctx, memberID)
 		require.NoError(t, err)
-		require.Equal(t, resp.Header.ClusterId, clusterId)
+		require.Equal(t, resp.Header.ClusterId, clusterID)
 		found := false
 		for _, member := range resp.Members {
-			if member.ID == memberId {
+			if member.ID == memberID {
 				found = true
 				break
 			}
 		}
-		require.False(t, found, "expect removed member not found in member remove response")
+		require.Falsef(t, found, "expect removed member not found in member remove response")
 	})
 }
 
 func TestAuthTestInvalidMgmt(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -646,7 +791,7 @@ func TestAuthTestInvalidMgmt(t *testing.T) {
 
 func TestAuthLeaseRevoke(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -657,7 +802,7 @@ func TestAuthLeaseRevoke(t *testing.T) {
 
 		lresp, err := rootAuthClient.Grant(ctx, 10)
 		require.NoError(t, err)
-		err = rootAuthClient.Put(ctx, "key", "value", config.PutOptions{LeaseID: lresp.ID})
+		_, err = rootAuthClient.Put(ctx, "key", "value", config.PutOptions{LeaseID: lresp.ID})
 		require.NoError(t, err)
 
 		_, err = rootAuthClient.Revoke(ctx, lresp.ID)
@@ -665,12 +810,19 @@ func TestAuthLeaseRevoke(t *testing.T) {
 
 		_, err = rootAuthClient.Get(ctx, "key", config.GetOptions{})
 		require.NoError(t, err)
+
+		lresp, err = rootAuthClient.Grant(ctx, 10)
+		require.NoError(t, err)
+
+		annoAuthClient := testutils.MustClient(clus.Client())
+		_, err = annoAuthClient.Revoke(ctx, lresp.ID)
+		require.ErrorContainsf(t, err, "etcdserver: user name is empty", "should fail to revoke lease with unauthenticated client")
 	})
 }
 
 func TestAuthRoleGet(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -696,7 +848,7 @@ func TestAuthRoleGet(t *testing.T) {
 
 func TestAuthUserGet(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -722,7 +874,7 @@ func TestAuthUserGet(t *testing.T) {
 
 func TestAuthRoleList(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1}))
 	defer clus.Close()
@@ -739,7 +891,7 @@ func TestAuthRoleList(t *testing.T) {
 
 func TestAuthJWTExpire(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1, AuthToken: defaultAuthToken}))
 	defer clus.Close()
@@ -748,20 +900,42 @@ func TestAuthJWTExpire(t *testing.T) {
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
 
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err := testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 		// wait an expiration of my JWT token
 		<-time.After(3 * tokenTTL)
 
 		// e2e test will generate a new token while
 		// integration test that re-uses the same etcd client will refresh the token on server failure.
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
+	})
+}
+
+func TestAuthJWTOnly(t *testing.T) {
+	testRunner.BeforeTest(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1, AuthToken: verifyJWTOnlyAuth}))
+	defer clus.Close()
+	cc := testutils.MustClient(clus.Client())
+	testutils.ExecuteUntil(ctx, t, func() {
+		authRev, err := setupAuthAndGetRevision(cc, []authRole{testRole}, []authUser{rootUser, testUser})
+		require.NoErrorf(t, err, "failed to enable auth")
+
+		token, err := createSignedJWT(defaultKeyPath, "RS256", testUserName, authRev)
+		require.NoErrorf(t, err, "failed to create test user JWT")
+
+		testUserAuthClient := testutils.MustClient(clus.Client(WithAuthToken(token)))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 	})
 }
 
 // TestAuthRevisionConsistency ensures auth revision is the same after member restarts
 func TestAuthRevisionConsistency(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1, AuthToken: defaultAuthToken}))
 	defer clus.Close()
@@ -797,7 +971,7 @@ func TestAuthRevisionConsistency(t *testing.T) {
 // TestAuthTestCacheReload ensures permissions are persisted and will be reloaded after member restarts
 func TestAuthTestCacheReload(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1, AuthToken: defaultAuthToken}))
 	defer clus.Close()
@@ -808,21 +982,23 @@ func TestAuthTestCacheReload(t *testing.T) {
 
 		// create foo since that is within the permission set
 		// expectation is to succeed
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{}))
+		_, err := testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{})
+		require.NoError(t, err)
 
 		// restart the node
 		clus.Members()[0].Stop()
 		require.NoError(t, clus.Members()[0].Start(ctx))
 
 		// nothing has changed, but it fails without refreshing cache after restart
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar2", config.PutOptions{}))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar2", config.PutOptions{})
+		require.NoError(t, err)
 	})
 }
 
 // TestAuthLeaseTimeToLive gated lease time to live with RBAC control
 func TestAuthLeaseTimeToLive(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{ClusterSize: 1, AuthToken: defaultAuthToken}))
 	defer clus.Close()
@@ -830,17 +1006,26 @@ func TestAuthLeaseTimeToLive(t *testing.T) {
 	testutils.ExecuteUntil(ctx, t, func() {
 		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
 		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
+		anonAuthClient := testutils.MustClient(clus.Client())
 
 		gresp, err := testUserAuthClient.Grant(ctx, 10)
 		require.NoError(t, err)
 		leaseID := gresp.ID
 
-		require.NoError(t, testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{LeaseID: leaseID}))
+		_, err = testUserAuthClient.Put(ctx, "foo", "bar", config.PutOptions{LeaseID: leaseID})
+		require.NoError(t, err)
 		_, err = testUserAuthClient.TimeToLive(ctx, leaseID, config.LeaseOption{WithAttachedKeys: true})
 		require.NoError(t, err)
 
+		_, err = anonAuthClient.TimeToLive(ctx, leaseID, config.LeaseOption{WithAttachedKeys: false})
+		require.ErrorContains(t, err, "etcdserver: user name is empty")
+
+		_, err = anonAuthClient.TimeToLive(ctx, leaseID, config.LeaseOption{WithAttachedKeys: true})
+		require.ErrorContains(t, err, "etcdserver: user name is empty")
+
 		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
-		require.NoError(t, rootAuthClient.Put(ctx, "bar", "foo", config.PutOptions{LeaseID: leaseID}))
+		_, err = rootAuthClient.Put(ctx, "bar", "foo", config.PutOptions{LeaseID: leaseID})
+		require.NoError(t, err)
 
 		// the lease is attached to bar, which test-user cannot access
 		_, err = testUserAuthClient.TimeToLive(ctx, leaseID, config.LeaseOption{WithAttachedKeys: true})
@@ -849,6 +1034,73 @@ func TestAuthLeaseTimeToLive(t *testing.T) {
 		// without --keys, access should be allowed
 		_, err = testUserAuthClient.TimeToLive(ctx, leaseID, config.LeaseOption{WithAttachedKeys: false})
 		require.NoError(t, err)
+	})
+}
+
+func TestAuthAlarm(t *testing.T) {
+	testRunner.BeforeTest(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(config.ClusterConfig{
+		ClusterSize:       1,
+		QuotaBackendBytes: 1024 * 5,
+	}))
+	defer clus.Close()
+
+	cc := testutils.MustClient(clus.Client())
+	testutils.ExecuteUntil(ctx, t, func() {
+		require.NoErrorf(t, setupAuth(cc, []authRole{testRole}, []authUser{rootUser, testUser}), "failed to enable auth")
+		rootAuthClient := testutils.MustClient(clus.Client(WithAuth(rootUserName, rootPassword)))
+		testUserAuthClient := testutils.MustClient(clus.Client(WithAuth(testUserName, testPassword)))
+		anonAuthClient := testutils.MustClient(clus.Client())
+
+		for i := 0; ; i++ {
+			_, err := rootAuthClient.Put(ctx,
+				testutil.PickKey(int64(i)), strings.Repeat("A", 1024), config.PutOptions{})
+			if err == nil {
+				continue
+			}
+
+			require.ErrorContains(t, err, "etcdserver: mvcc: database space exceeded")
+			break
+		}
+
+		memberID := uint64(0)
+
+		for i := 0; i < 10; i++ {
+			resp, rerr := rootAuthClient.AlarmList(ctx)
+			require.NoError(t, rerr)
+
+			if len(resp.Alarms) > 0 {
+				memberID = resp.Header.MemberId
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		require.NotEqualf(t, uint64(0), memberID, "expect to find alarm with non-zero member ID")
+
+		_, err := anonAuthClient.AlarmList(ctx)
+		require.ErrorContains(t, err, "etcdserver: user name is empty")
+
+		_, err = testUserAuthClient.AlarmList(ctx)
+		require.NoError(t, err)
+
+		_, err = testUserAuthClient.AlarmDisarm(ctx, &clientv3.AlarmMember{
+			MemberID: memberID,
+			Alarm:    pb.AlarmType_NOSPACE,
+		})
+		require.ErrorContains(t, err, PermissionDenied)
+
+		resp, err := rootAuthClient.AlarmDisarm(ctx, &clientv3.AlarmMember{
+			MemberID: memberID,
+			Alarm:    pb.AlarmType_NOSPACE,
+		})
+		require.NoError(t, err)
+		require.Lenf(t, resp.Alarms, 1, "expect 1 alarm from disarm but got %v", resp.Alarms)
+
+		resp, err = rootAuthClient.AlarmList(ctx)
+		require.NoError(t, err)
+		require.Emptyf(t, resp.Alarms, "expect no alarm after disarm but got %v", resp.Alarms)
 	})
 }
 

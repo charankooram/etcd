@@ -50,6 +50,7 @@ var (
 
 	keySpaceSize int
 	seqKeys      bool
+	prefix       string
 
 	compactInterval   time.Duration
 	compactIndexDelta int64
@@ -66,9 +67,12 @@ func init() {
 	putCmd.Flags().IntVar(&putTotal, "total", 10000, "Total number of put requests")
 	putCmd.Flags().IntVar(&keySpaceSize, "key-space-size", 1, "Maximum possible keys")
 	putCmd.Flags().BoolVar(&seqKeys, "sequential-keys", false, "Use sequential keys")
+	putCmd.Flags().StringVar(&prefix, "prefix", "", "Prefix for keys")
 	putCmd.Flags().DurationVar(&compactInterval, "compact-interval", 0, `Interval to compact database (do not duplicate this with etcd's 'auto-compaction-retention' flag) (e.g. --compact-interval=5m compacts every 5-minute)`)
 	putCmd.Flags().Int64Var(&compactIndexDelta, "compact-index-delta", 1000, "Delta between current revision and compact revision (e.g. current revision 10000, compact at 9000)")
 	putCmd.Flags().BoolVar(&checkHashkv, "check-hashkv", false, "'true' to check hashkv")
+	putCmd.Flags().BoolVar(&defrag, "defrag", false, "'true' to trigger a one-time defragmentation at approximately --defrag-trigger-percent of --total requests")
+	putCmd.Flags().IntVar(&defragTriggerPercent, "defrag-trigger-percent", 40, "Percentage of --total requests at which --defrag triggers defragmentation")
 }
 
 func putFunc(cmd *cobra.Command, _ []string) {
@@ -88,7 +92,7 @@ func putFunc(cmd *cobra.Command, _ []string) {
 	bar = pb.New(putTotal)
 	bar.Start()
 
-	r := newReport()
+	r := newReport(cmd.Name())
 	for i := range clients {
 		wg.Add(1)
 		go func(c *v3.Client) {
@@ -111,7 +115,8 @@ func putFunc(cmd *cobra.Command, _ []string) {
 			} else {
 				binary.PutVarint(k, int64(rand.Intn(keySpaceSize)))
 			}
-			requests <- v3.OpPut(string(k), v)
+			requests <- v3.OpPut(prefix+string(k), v)
+			maybeTriggerDefrag(clients, i, putTotal)
 		}
 		close(requests)
 	}()
@@ -130,6 +135,7 @@ func putFunc(cmd *cobra.Command, _ []string) {
 	close(r.Results())
 	bar.Finish()
 	fmt.Println(<-rc)
+	printDefragDuration()
 
 	if checkHashkv {
 		hashKV(cmd, clients)
@@ -152,13 +158,6 @@ func compactKV(clients []*v3.Client) {
 	}
 }
 
-func max(n1, n2 int64) int64 {
-	if n1 > n2 {
-		return n1
-	}
-	return n2
-}
-
 func hashKV(cmd *cobra.Command, clients []*v3.Client) {
 	eps, err := cmd.Flags().GetStringSlice("endpoints")
 	if err != nil {
@@ -170,14 +169,14 @@ func hashKV(cmd *cobra.Command, clients []*v3.Client) {
 	host := eps[0]
 
 	st := time.Now()
-	rh, eh := clients[0].HashKV(context.Background(), host, 0)
-	if eh != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get the hashkv of endpoint %s (%v)\n", host, eh)
+	rh, err := clients[0].HashKV(context.Background(), host, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get the hashkv of endpoint %s (%v)\n", host, err)
 		panic(err)
 	}
-	rt, es := clients[0].Status(context.Background(), host)
-	if es != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get the status of endpoint %s (%v)\n", host, es)
+	rt, err := clients[0].Status(context.Background(), host)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get the status of endpoint %s (%v)\n", host, err)
 		panic(err)
 	}
 

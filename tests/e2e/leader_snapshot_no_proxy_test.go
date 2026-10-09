@@ -35,7 +35,7 @@ import (
 
 func TestRecoverSnapshotBackend(t *testing.T) {
 	e2e.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	epc, err := e2e.NewEtcdProcessCluster(ctx, t,
@@ -92,7 +92,7 @@ func TestRecoverSnapshotBackend(t *testing.T) {
 	err = blackholedMember.Start(ctx)
 	require.NoError(t, err)
 	_, err = blackholedMember.Logs().ExpectWithContext(ctx, expect.ExpectedResponse{Value: "Recovering from snapshot backend"})
-	assert.NoError(t, err)
-	err = blackholedMember.Etcdctl().Put(ctx, "a", "1", config.PutOptions{})
+	require.NoError(t, err)
+	_, err = blackholedMember.Etcdctl().Put(ctx, "a", "1", config.PutOptions{})
 	assert.NoError(t, err)
 }

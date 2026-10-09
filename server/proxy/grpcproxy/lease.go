@@ -16,6 +16,7 @@ package grpcproxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,9 @@ type leaseProxy struct {
 
 	// wg waits until all outstanding leaseProxyStream quit.
 	wg sync.WaitGroup
+
+	// we want compile errors if new methods are added
+	pb.LeaseServer
 }
 
 func NewLeaseProxy(ctx context.Context, c *clientv3.Client) (pb.LeaseServer, <-chan struct{}) {
@@ -245,7 +249,7 @@ type leaseProxyStream struct {
 func (lps *leaseProxyStream) recvLoop() error {
 	for {
 		rr, err := lps.stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {

@@ -17,7 +17,7 @@ package etcdserver
 import (
 	"context"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/membershippb"
@@ -33,7 +33,7 @@ type serverVersionAdapter struct {
 	*EtcdServer
 }
 
-func NewServerVersionAdapter(s *EtcdServer) *serverVersionAdapter {
+func NewServerVersionAdapter(s *EtcdServer) serverversion.Server {
 	return &serverVersionAdapter{
 		EtcdServer: s,
 	}
@@ -45,19 +45,15 @@ func (s *serverVersionAdapter) UpdateClusterVersion(version string) {
 	s.GoAttach(func() { s.updateClusterVersionV3(version) })
 }
 
-func (s *serverVersionAdapter) LinearizableReadNotify(ctx context.Context) error {
-	return s.linearizableReadNotify(ctx)
-}
-
 func (s *serverVersionAdapter) DowngradeEnable(ctx context.Context, targetVersion *semver.Version) error {
 	raftRequest := membershippb.DowngradeInfoSetRequest{Enabled: true, Ver: targetVersion.String()}
-	_, err := s.raftRequest(ctx, pb.InternalRaftRequest{DowngradeInfoSet: &raftRequest})
+	_, err := s.raftRequest(ctx, &pb.InternalRaftRequest{DowngradeInfoSet: &raftRequest})
 	return err
 }
 
 func (s *serverVersionAdapter) DowngradeCancel(ctx context.Context) error {
 	raftRequest := membershippb.DowngradeInfoSetRequest{Enabled: false}
-	_, err := s.raftRequest(ctx, pb.InternalRaftRequest{DowngradeInfoSet: &raftRequest})
+	_, err := s.raftRequest(ctx, &pb.InternalRaftRequest{DowngradeInfoSet: &raftRequest})
 	return err
 }
 
@@ -70,7 +66,7 @@ func (s *serverVersionAdapter) GetDowngradeInfo() *serverversion.DowngradeInfo {
 }
 
 func (s *serverVersionAdapter) GetMembersVersions() map[string]*version.Versions {
-	return getMembersVersions(s.lg, s.cluster, s.MemberId(), s.peerRt, s.Cfg.ReqTimeout())
+	return getMembersVersions(s.lg, s.cluster, s.MemberID(), s.peerRt, s.Cfg.ReqTimeout())
 }
 
 func (s *serverVersionAdapter) GetStorageVersion() *semver.Version {

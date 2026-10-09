@@ -29,7 +29,7 @@ const (
 type Syncer interface {
 	// SyncBase syncs the base state of the key-value state.
 	// The key-value state are sent through the returned chan.
-	SyncBase(ctx context.Context) (<-chan clientv3.GetResponse, chan error)
+	SyncBase(ctx context.Context) (<-chan *clientv3.GetResponse, chan error)
 	// SyncUpdates syncs the updates of the key-value state.
 	// The update events are sent through the returned chan.
 	SyncUpdates(ctx context.Context) clientv3.WatchChan
@@ -46,8 +46,8 @@ type syncer struct {
 	prefix string
 }
 
-func (s *syncer) SyncBase(ctx context.Context) (<-chan clientv3.GetResponse, chan error) {
-	respchan := make(chan clientv3.GetResponse, 1024)
+func (s *syncer) SyncBase(ctx context.Context) (<-chan *clientv3.GetResponse, chan error) {
+	respchan := make(chan *clientv3.GetResponse, 1024)
 	errchan := make(chan error, 1)
 
 	// if rev is not specified, we will choose the most recent revision.
@@ -74,8 +74,10 @@ func (s *syncer) SyncBase(ctx context.Context) (<-chan clientv3.GetResponse, cha
 
 		var key string
 
-		opts := []clientv3.OpOption{clientv3.WithLimit(batchLimit), clientv3.WithRev(s.rev),
-			clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend)}
+		opts := []clientv3.OpOption{
+			clientv3.WithLimit(batchLimit), clientv3.WithRev(s.rev),
+			clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend),
+		}
 
 		if len(s.prefix) == 0 {
 			// If len(s.prefix) == 0, we will sync the entire key-value space.
@@ -97,7 +99,7 @@ func (s *syncer) SyncBase(ctx context.Context) (<-chan clientv3.GetResponse, cha
 				return
 			}
 
-			respchan <- *resp
+			respchan <- resp
 
 			if !resp.More {
 				return

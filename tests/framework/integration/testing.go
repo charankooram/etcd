@@ -18,10 +18,8 @@ import (
 	"os"
 	"testing"
 
-	grpc_logsettable "github.com/grpc-ecosystem/go-grpc-middleware/logging/settable"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zapgrpc"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
@@ -31,12 +29,9 @@ import (
 	gofail "go.etcd.io/gofail/runtime"
 )
 
-var grpc_logger grpc_logsettable.SettableLoggerV2
-var insideTestContext bool
-
-func init() {
-	grpc_logger = grpc_logsettable.ReplaceGrpcLoggerV2()
-}
+var (
+	insideTestContext bool
+)
 
 type testOptions struct {
 	goLeakDetection bool
@@ -81,6 +76,12 @@ func BeforeTestExternal(t testutil.TB) {
 	BeforeTest(t, WithoutSkipInShort(), WithoutGoLeakDetection())
 }
 
+func SkipIfNoGoFail(t testutil.TB) {
+	if len(gofail.List()) == 0 {
+		t.Skip("please run 'make gofail-enable' before running the test")
+	}
+}
+
 func BeforeTest(t testutil.TB, opts ...TestOption) {
 	t.Helper()
 	options := newTestOptions(opts...)
@@ -98,9 +99,7 @@ func BeforeTest(t testutil.TB, opts ...TestOption) {
 	}
 
 	if options.failpoint != nil && len(options.failpoint.name) != 0 {
-		if len(gofail.List()) == 0 {
-			t.Skip("please run 'make gofail-enable' before running the test")
-		}
+		SkipIfNoGoFail(t)
 		require.NoError(t, gofail.Enable(options.failpoint.name, options.failpoint.payload))
 		t.Cleanup(func() {
 			require.NoError(t, gofail.Disable(options.failpoint.name))
@@ -118,13 +117,11 @@ func BeforeTest(t testutil.TB, opts ...TestOption) {
 
 	// Registering cleanup early, such it will get executed even if the helper fails.
 	t.Cleanup(func() {
-		grpc_logger.Reset()
 		insideTestContext = previousInsideTestContext
 		os.Chdir(previousWD)
 		revertFunc()
 	})
 
-	grpc_logger.Set(zapgrpc.NewLogger(zaptest.NewLogger(t).Named("grpc")))
 	insideTestContext = true
 
 	os.Chdir(t.TempDir())
@@ -136,18 +133,18 @@ func assertInTestContext(t testutil.TB) {
 	}
 }
 
-func NewEmbedConfig(t testing.TB, name string) *embed.Config {
+func NewEmbedConfig(tb testing.TB, name string) *embed.Config {
 	cfg := embed.NewConfig()
 	cfg.Name = name
-	lg := zaptest.NewLogger(t, zaptest.Level(zapcore.InfoLevel)).Named(cfg.Name)
+	lg := zaptest.NewLogger(tb, zaptest.Level(zapcore.InfoLevel)).Named(cfg.Name)
 	cfg.ZapLoggerBuilder = embed.NewZapLoggerBuilder(lg)
-	cfg.Dir = t.TempDir()
+	cfg.Dir = tb.TempDir()
 	return cfg
 }
 
-func NewClient(t testing.TB, cfg clientv3.Config) (*clientv3.Client, error) {
+func NewClient(tb testing.TB, cfg clientv3.Config) (*clientv3.Client, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = zaptest.NewLogger(t).Named("client")
+		cfg.Logger = zaptest.NewLogger(tb).Named("client")
 	}
 	return clientv3.New(cfg)
 }

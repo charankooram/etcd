@@ -33,7 +33,7 @@ import (
 
 func TestMemberReplace(t *testing.T) {
 	e2e.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 
 	epc, err := e2e.NewEtcdProcessCluster(ctx, t)
@@ -50,9 +50,9 @@ func TestMemberReplace(t *testing.T) {
 	cc, err := e2e.NewEtcdctl(epc.Cfg.Client, endpoints)
 	require.NoError(t, err)
 
-	memberID, found, err := getMemberIdByName(ctx, cc, memberName)
+	memberID, found, err := getMemberIDByName(ctx, cc, memberName)
 	require.NoError(t, err)
-	require.Equal(t, found, true, "Member not found")
+	require.Truef(t, found, "Member not found")
 
 	// Need to wait health interval for cluster to accept member changes
 	time.Sleep(etcdserver.HealthInterval)
@@ -60,9 +60,9 @@ func TestMemberReplace(t *testing.T) {
 	t.Logf("Removing member %s", memberName)
 	_, err = cc.MemberRemove(ctx, memberID)
 	require.NoError(t, err)
-	_, found, err = getMemberIdByName(ctx, cc, memberName)
+	_, found, err = getMemberIDByName(ctx, cc, memberName)
 	require.NoError(t, err)
-	require.Equal(t, found, false, "Expected member to be removed")
+	require.Falsef(t, found, "Expected member to be removed")
 	for member.IsRunning() {
 		err = member.Wait(ctx)
 		if err != nil && !strings.Contains(err.Error(), "unexpected exit code") {
@@ -75,10 +75,10 @@ func TestMemberReplace(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Logf("Adding member %s back", memberName)
-	removedMemberPeerUrl := member.Config().PeerURL.String()
-	_, err = cc.MemberAdd(ctx, memberName, []string{removedMemberPeerUrl})
+	removedMemberPeerURL := member.Config().PeerURL.String()
+	_, err = cc.MemberAdd(ctx, memberName, []string{removedMemberPeerURL})
 	require.NoError(t, err)
-	err = patchArgs(member.Config().Args, "initial-cluster-state", "existing")
+	err = e2e.PatchArgs(member.Config().Args, "initial-cluster-state", "existing")
 	require.NoError(t, err)
 
 	// Sleep 100ms to bypass the known issue https://github.com/etcd-io/etcd/issues/16687.
@@ -88,7 +88,7 @@ func TestMemberReplace(t *testing.T) {
 	require.NoError(t, err)
 	testutils.ExecuteUntil(ctx, t, func() {
 		for {
-			_, found, err := getMemberIdByName(ctx, cc, memberName)
+			_, found, err := getMemberIDByName(ctx, cc, memberName)
 			if err != nil || !found {
 				time.Sleep(10 * time.Millisecond)
 				continue
@@ -100,7 +100,7 @@ func TestMemberReplace(t *testing.T) {
 
 func TestMemberReplaceWithLearner(t *testing.T) {
 	e2e.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 
 	epc, err := e2e.NewEtcdProcessCluster(ctx, t)
@@ -117,9 +117,9 @@ func TestMemberReplaceWithLearner(t *testing.T) {
 	cc, err := e2e.NewEtcdctl(epc.Cfg.Client, endpoints)
 	require.NoError(t, err)
 
-	memberID, found, err := getMemberIdByName(ctx, cc, memberName)
+	memberID, found, err := getMemberIDByName(ctx, cc, memberName)
 	require.NoError(t, err)
-	require.Equal(t, true, found, "Member not found")
+	require.Truef(t, found, "Member not found")
 
 	// Need to wait health interval for cluster to accept member changes
 	time.Sleep(etcdserver.HealthInterval)
@@ -127,9 +127,9 @@ func TestMemberReplaceWithLearner(t *testing.T) {
 	t.Logf("Removing member %s", memberName)
 	_, err = cc.MemberRemove(ctx, memberID)
 	require.NoError(t, err)
-	_, found, err = getMemberIdByName(ctx, cc, memberName)
+	_, found, err = getMemberIDByName(ctx, cc, memberName)
 	require.NoError(t, err)
-	require.Equal(t, false, found, "Expected member to be removed")
+	require.Falsef(t, found, "Expected member to be removed")
 	for member.IsRunning() {
 		err = member.Wait(ctx)
 		if err != nil && !strings.Contains(err.Error(), "unexpected exit code") {
@@ -142,11 +142,11 @@ func TestMemberReplaceWithLearner(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Logf("Adding member %s back as Learner", memberName)
-	removedMemberPeerUrl := member.Config().PeerURL.String()
-	_, err = cc.MemberAddAsLearner(ctx, memberName, []string{removedMemberPeerUrl})
+	removedMemberPeerURL := member.Config().PeerURL.String()
+	_, err = cc.MemberAddAsLearner(ctx, memberName, []string{removedMemberPeerURL})
 	require.NoError(t, err)
 
-	err = patchArgs(member.Config().Args, "initial-cluster-state", "existing")
+	err = e2e.PatchArgs(member.Config().Args, "initial-cluster-state", "existing")
 	require.NoError(t, err)
 
 	// Sleep 100ms to bypass the known issue https://github.com/etcd-io/etcd/issues/16687.
@@ -158,7 +158,7 @@ func TestMemberReplaceWithLearner(t *testing.T) {
 	var learnMemberID uint64
 	testutils.ExecuteUntil(ctx, t, func() {
 		for {
-			learnMemberID, found, err = getMemberIdByName(ctx, cc, memberName)
+			learnMemberID, found, err = getMemberIDByName(ctx, cc, memberName)
 			if err != nil || !found {
 				time.Sleep(10 * time.Millisecond)
 				continue
@@ -167,9 +167,9 @@ func TestMemberReplaceWithLearner(t *testing.T) {
 		}
 	})
 
-	learnMemberID, found, err = getMemberIdByName(ctx, cc, memberName)
+	learnMemberID, found, err = getMemberIDByName(ctx, cc, memberName)
 	require.NoError(t, err)
-	require.Equal(t, true, found, "Member not found")
+	require.Truef(t, found, "Member not found")
 
 	_, err = cc.MemberPromote(ctx, learnMemberID)
 	require.NoError(t, err)

@@ -16,8 +16,10 @@ package rafthttp
 
 import (
 	"bytes"
-	"reflect"
+	"errors"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/raft/v3/raftpb"
 )
@@ -30,29 +32,29 @@ func TestMessage(t *testing.T) {
 		readBytesLimit = originalLimit
 	}()
 	tests := []struct {
-		msg       raftpb.Message
+		msg       *raftpb.Message
 		encodeErr error
 		decodeErr error
 	}{
 		{
-			raftpb.Message{
-				Type:    raftpb.MsgApp,
-				From:    1,
-				To:      2,
-				Term:    1,
-				LogTerm: 1,
-				Index:   3,
-				Entries: []raftpb.Entry{{Term: 1, Index: 4}},
+			&raftpb.Message{
+				Type:    raftpb.MsgApp.Enum(),
+				From:    new(uint64(1)),
+				To:      new(uint64(2)),
+				Term:    new(uint64(1)),
+				LogTerm: new(uint64(1)),
+				Index:   new(uint64(3)),
+				Entries: []*raftpb.Entry{{Term: new(uint64(1)), Index: new(uint64(4))}},
 			},
 			nil,
 			nil,
 		},
 		{
-			raftpb.Message{
-				Type: raftpb.MsgProp,
-				From: 1,
-				To:   2,
-				Entries: []raftpb.Entry{
+			&raftpb.Message{
+				Type: raftpb.MsgProp.Enum(),
+				From: new(uint64(1)),
+				To:   new(uint64(2)),
+				Entries: []*raftpb.Entry{
 					{Data: []byte("some data")},
 					{Data: []byte("some data")},
 					{Data: []byte("some data")},
@@ -62,11 +64,11 @@ func TestMessage(t *testing.T) {
 			nil,
 		},
 		{
-			raftpb.Message{
-				Type: raftpb.MsgProp,
-				From: 1,
-				To:   2,
-				Entries: []raftpb.Entry{
+			&raftpb.Message{
+				Type: raftpb.MsgProp.Enum(),
+				From: new(uint64(1)),
+				To:   new(uint64(2)),
+				Entries: []*raftpb.Entry{
 					{Data: bytes.Repeat([]byte("a"), int(readBytesLimit+10))},
 				},
 			},
@@ -77,18 +79,18 @@ func TestMessage(t *testing.T) {
 	for i, tt := range tests {
 		b := &bytes.Buffer{}
 		enc := &messageEncoder{w: b}
-		if err := enc.encode(&tt.msg); err != tt.encodeErr {
+		if err := enc.encode(tt.msg); !errors.Is(err, tt.encodeErr) {
 			t.Errorf("#%d: encode message error expected %v, got %v", i, tt.encodeErr, err)
 			continue
 		}
 		dec := &messageDecoder{r: b}
 		m, err := dec.decode()
-		if err != tt.decodeErr {
+		if !errors.Is(err, tt.decodeErr) {
 			t.Errorf("#%d: decode message error expected %v, got %v", i, tt.decodeErr, err)
 			continue
 		}
 		if err == nil {
-			if !reflect.DeepEqual(m, tt.msg) {
+			if !proto.Equal(m, tt.msg) {
 				t.Errorf("#%d: message = %+v, want %+v", i, m, tt.msg)
 			}
 		}

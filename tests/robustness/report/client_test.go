@@ -21,7 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -32,17 +32,17 @@ import (
 )
 
 func TestPersistLoadClientReports(t *testing.T) {
-	h := model.NewAppendableHistory(identity.NewIdProvider())
+	h := model.NewAppendableHistory(identity.NewIDProvider())
 	baseTime := time.Now()
 
 	start := time.Since(baseTime)
 	time.Sleep(time.Nanosecond)
 	stop := time.Since(baseTime)
-	h.AppendRange("key", "", 0, 0, start, stop, &clientv3.GetResponse{Header: &etcdserverpb.ResponseHeader{Revision: 2}, Count: 2, Kvs: []*mvccpb.KeyValue{{
+	h.AppendRange("key", "", 0, 0, false, start, stop, &clientv3.GetResponse{Header: &etcdserverpb.ResponseHeader{Revision: 2}, Count: 2, Kvs: []*mvccpb.KeyValue{{
 		Key:         []byte("key"),
 		ModRevision: 2,
 		Value:       []byte("value"),
-	}}})
+	}}}, nil)
 
 	start = time.Since(baseTime)
 	time.Sleep(time.Nanosecond)
@@ -122,20 +122,21 @@ func TestPersistLoadClientReports(t *testing.T) {
 	}
 	reports := []ClientReport{
 		{
-			ClientId: 1,
+			ClientID: 1,
 			KeyValue: h.Operations(),
 			Watch:    []model.WatchOperation{watch},
 		},
 		{
-			ClientId: 2,
+			ClientID: 2,
 			KeyValue: nil,
 			Watch:    []model.WatchOperation{watch},
 		},
 	}
 	path := t.TempDir()
-	persistClientReports(t, zaptest.NewLogger(t), path, reports)
+	err := persistClientReports(zaptest.NewLogger(t), path, reports)
+	require.NoError(t, err)
 	got, err := LoadClientReports(path)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	if diff := cmp.Diff(reports, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("Reports don't match after persist and load, %s", diff)
 	}

@@ -16,10 +16,14 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"hash"
 	"io"
 	"os"
 	"sync"
+	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/etcd/pkg/v3/crc"
 	"go.etcd.io/etcd/pkg/v3/ioutil"
@@ -60,41 +64,37 @@ func newFileEncoder(f *os.File, prevCrc uint32) (*encoder, error) {
 }
 
 func (e *encoder) encode(rec *walpb.Record) error {
+	if rec.Type == nil {
+		return errors.New("record is missing type")
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.crc.Write(rec.Data)
-	rec.Crc = e.crc.Sum32()
+	rec.Crc = new(e.crc.Sum32())
 	var (
 		data []byte
 		err  error
-		n    int
 	)
 
-	if rec.Size() > len(e.buf) {
-		data, err = rec.Marshal()
+	size := proto.Size(rec)
+	opts := proto.MarshalOptions{UseCachedSize: true}
+	if size > len(e.buf) {
+		data, err = proto.Marshal(rec)
 		if err != nil {
 			return err
 		}
 	} else {
-		n, err = rec.MarshalTo(e.buf)
+		data, err = opts.MarshalAppend(e.buf[:0], rec)
 		if err != nil {
 			return err
 		}
-		data = e.buf[:n]
 	}
 
-	lenField, padBytes := encodeFrameSize(len(data))
-	if err = writeUint64(e.bw, lenField, e.uint64buf); err != nil {
-		return err
-	}
+	data, lenField := prepareDataWithPadding(data)
 
-	if padBytes != 0 {
-		data = append(data, make([]byte, padBytes)...)
-	}
-	n, err = e.bw.Write(data)
-	walWriteBytes.Add(float64(n))
-	return err
+	return write(e.bw, e.uint64buf, data, lenField)
 }
 
 func encodeFrameSize(dataBytes int) (lenField uint64, padBytes int) {
@@ -113,10 +113,28 @@ func (e *encoder) flush() error {
 	return e.bw.Flush()
 }
 
-func writeUint64(w io.Writer, n uint64, buf []byte) error {
-	// http://golang.org/src/encoding/binary/binary.go
-	binary.LittleEndian.PutUint64(buf, n)
-	nv, err := w.Write(buf)
+func prepareDataWithPadding(data []byte) ([]byte, uint64) {
+	lenField, padBytes := encodeFrameSize(len(data))
+	if padBytes != 0 {
+		data = append(data, make([]byte, padBytes)...)
+	}
+	return data, lenField
+}
+
+func write(w io.Writer, uint64buf, data []byte, lenField uint64) error {
+	// write padding info
+	binary.LittleEndian.PutUint64(uint64buf, lenField)
+
+	start := time.Now()
+	nv, err := w.Write(uint64buf)
 	walWriteBytes.Add(float64(nv))
+	if err != nil {
+		return err
+	}
+
+	// write the record with padding
+	n, err := w.Write(data)
+	walWriteSec.Observe(time.Since(start).Seconds())
+	walWriteBytes.Add(float64(n))
 	return err
 }

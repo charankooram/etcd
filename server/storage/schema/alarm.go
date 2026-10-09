@@ -16,17 +16,26 @@ package schema
 
 import (
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 )
+
+type AlarmBackend interface {
+	CreateAlarmBucket()
+	MustPutAlarm(member *etcdserverpb.AlarmMember)
+	MustDeleteAlarm(alarm *etcdserverpb.AlarmMember)
+	GetAllAlarms() ([]*etcdserverpb.AlarmMember, error)
+	ForceCommit()
+}
 
 type alarmBackend struct {
 	lg *zap.Logger
 	be backend.Backend
 }
 
-func NewAlarmBackend(lg *zap.Logger, be backend.Backend) *alarmBackend {
+func NewAlarmBackend(lg *zap.Logger, be backend.Backend) AlarmBackend {
 	return &alarmBackend{
 		lg: lg,
 		be: be,
@@ -48,7 +57,7 @@ func (s *alarmBackend) MustPutAlarm(alarm *etcdserverpb.AlarmMember) {
 }
 
 func (s *alarmBackend) mustUnsafePutAlarm(tx backend.UnsafeWriter, alarm *etcdserverpb.AlarmMember) {
-	v, err := alarm.Marshal()
+	v, err := proto.Marshal(alarm)
 	if err != nil {
 		s.lg.Panic("failed to marshal alarm member", zap.Error(err))
 	}
@@ -64,7 +73,7 @@ func (s *alarmBackend) MustDeleteAlarm(alarm *etcdserverpb.AlarmMember) {
 }
 
 func (s *alarmBackend) mustUnsafeDeleteAlarm(tx backend.UnsafeWriter, alarm *etcdserverpb.AlarmMember) {
-	v, err := alarm.Marshal()
+	v, err := proto.Marshal(alarm)
 	if err != nil {
 		s.lg.Panic("failed to marshal alarm member", zap.Error(err))
 	}
@@ -83,7 +92,7 @@ func (s *alarmBackend) unsafeGetAllAlarms(tx backend.UnsafeReader) ([]*etcdserve
 	var ms []*etcdserverpb.AlarmMember
 	err := tx.UnsafeForEach(Alarm, func(k, v []byte) error {
 		var m etcdserverpb.AlarmMember
-		if err := m.Unmarshal(k); err != nil {
+		if err := proto.Unmarshal(k, &m); err != nil {
 			return err
 		}
 		ms = append(ms, &m)

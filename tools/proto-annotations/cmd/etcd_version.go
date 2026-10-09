@@ -17,29 +17,28 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 
 	"go.etcd.io/etcd/server/v3/storage/wal"
 )
 
-var (
-	// externalPackages that are not expected to have etcd version annotation.
-	externalPackages = []string{
-		"io.prometheus.client",
-		"grpc.binarylog.v1",
-		"google.protobuf",
-		"google.rpc",
-		"google.api",
-		"raftpb",
-		"grpc.gateway.protoc_gen_swagger.options",
-		"grpc.gateway.protoc_gen_openapiv2.options",
-	}
-)
+// externalPackages that are not expected to have etcd version annotation.
+var externalPackages = []string{
+	"io.prometheus.client",
+	"grpc.binarylog.v1",
+	"google.protobuf",
+	"google.rpc",
+	"google.api",
+	"raftpb",
+	"grpc.gateway.protoc_gen_swagger.options",
+	"grpc.gateway.protoc_gen_openapiv2.options",
+}
 
 // printEtcdVersion writes etcd_version proto annotation to stdout and returns any errors encountered when reading annotation.
 func printEtcdVersion() []error {
@@ -74,10 +73,8 @@ func allEtcdVersionAnnotations() (annotations []etcdVersionAnnotation, err error
 	var fileAnnotations []etcdVersionAnnotation
 	protoregistry.GlobalFiles.RangeFiles(func(file protoreflect.FileDescriptor) bool {
 		pkg := string(file.Package())
-		for _, externalPkg := range externalPackages {
-			if pkg == externalPkg {
-				return true
-			}
+		if slices.Contains(externalPackages, pkg) {
+			return true
 		}
 		fileAnnotations, err = fileEtcdVersionAnnotations(file)
 		if err != nil {
@@ -107,16 +104,16 @@ func (a etcdVersionAnnotation) Validate() (errs []error) {
 	if a.version == nil {
 		return nil
 	}
-	if a.version.Major == 0 {
+	if a.version.Major() == 0 {
 		errs = append(errs, fmt.Errorf("%s: etcd_version major version should not be zero", a.fullName))
 	}
-	if a.version.Patch != 0 {
+	if a.version.Patch() != 0 {
 		errs = append(errs, fmt.Errorf("%s: etcd_version patch version should be zero", a.fullName))
 	}
-	if a.version.PreRelease != "" {
+	if a.version.Prerelease() != "" {
 		errs = append(errs, fmt.Errorf("%s: etcd_version should not be prerelease", a.fullName))
 	}
-	if a.version.Metadata != "" {
+	if a.version.Metadata() != "" {
 		errs = append(errs, fmt.Errorf("%s: etcd_version should not have metadata", a.fullName))
 	}
 	return errs
@@ -127,6 +124,6 @@ func (a etcdVersionAnnotation) PrintLine(out io.Writer) error {
 		_, err := fmt.Fprintf(out, "%s: \"\"\n", a.fullName)
 		return err
 	}
-	_, err := fmt.Fprintf(out, "%s: \"%d.%d\"\n", a.fullName, a.version.Major, a.version.Minor)
+	_, err := fmt.Fprintf(out, "%s: \"%d.%d\"\n", a.fullName, a.version.Major(), a.version.Minor())
 	return err
 }

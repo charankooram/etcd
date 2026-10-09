@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bgentry/speakeasy"
 	"google.golang.org/grpc/grpclog"
@@ -29,50 +31,66 @@ import (
 )
 
 var (
-	// dialTotal counts the number of mustCreateConn calls so that endpoint
-	// connections can be handed out in round-robin order
-	dialTotal int
-
-	// leaderEps is a cache for holding endpoints of a leader node
-	leaderEps []string
-
 	// cache the username and password for multiple connections
 	globalUserName string
 	globalPassword string
+
+	// defrag is the shared backing var for each benchmark command's --defrag flag.
+	defrag bool
+
+	// defragTriggerPercent is the shared backing var for each benchmark command's
+	// --defrag-trigger-percent flag.
+	defragTriggerPercent int
+
+	// defragOnce ensures the Defragment RPC triggered by --defrag fires exactly once per
+	// run, even though maybeTriggerDefrag is called from a tight per-request loop.
+	defragOnce sync.Once
+
+	// defragDuration is how long the Defragment RPC triggered by --defrag took.
+	defragDuration time.Duration
 )
 
-func mustFindLeaderEndpoints(c *clientv3.Client) {
-	resp, lerr := c.MemberList(context.TODO())
-	if lerr != nil {
-		fmt.Fprintf(os.Stderr, "failed to get a member list: %s\n", lerr)
-		os.Exit(1)
+// maybeTriggerDefrag issues a single, asynchronous Defragment RPC against the first
+// --endpoints entry once a command's request-producer loop reaches approximately
+// --defrag-trigger-percent of total, when --defrag is set. current/total are that loop's
+// own progress counters (e.g. i and putTotal), so it should be called once per iteration
+// from that loop. The RPC runs in its own goroutine, tracked via the shared wg, so the
+// producer keeps issuing requests at full rate while defrag runs concurrently.
+func maybeTriggerDefrag(clients []*clientv3.Client, current, total int) {
+	if !defrag || total <= 0 || current != total*defragTriggerPercent/100 {
+		return
 	}
+	defragOnce.Do(func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ep := clients[0].Endpoints()[0]
+			fmt.Printf("defrag: triggering defragmentation on %s (%d/%d requests issued)\n", ep, current, total)
+			st := time.Now()
+			if _, err := clients[0].Defragment(context.Background(), ep); err != nil {
+				fmt.Fprintf(os.Stderr, "defrag: failed to defragment %s: %v\n", ep, err)
+				return
+			}
+			defragDuration = time.Since(st)
+			fmt.Printf("defrag: defragmentation of %s completed in %v\n", ep, defragDuration)
+		}()
+	})
+}
 
-	leaderID := uint64(0)
-	for _, ep := range c.Endpoints() {
-		if sresp, serr := c.Status(context.TODO(), ep); serr == nil {
-			leaderID = sresp.Leader
-			break
-		}
+// printDefragDuration prints a --defrag run's duration as part of a command's final summary.
+func printDefragDuration() {
+	if defrag && defragDuration > 0 {
+		fmt.Printf("Defrag duration: %v\n", defragDuration)
 	}
-
-	for _, m := range resp.Members {
-		if m.ID == leaderID {
-			leaderEps = m.ClientURLs
-			return
-		}
-	}
-
-	fmt.Fprint(os.Stderr, "failed to find a leader endpoint\n")
-	os.Exit(1)
 }
 
 func getUsernamePassword(usernameFlag string) (string, string, error) {
 	if globalUserName != "" && globalPassword != "" {
 		return globalUserName, globalPassword, nil
 	}
-	colon := strings.Index(usernameFlag, ":")
-	if colon == -1 {
+	var ok bool
+	globalUserName, globalPassword, ok = strings.Cut(usernameFlag, ":")
+	if !ok {
 		// Prompt for the password.
 		password, err := speakeasy.Ask("Password: ")
 		if err != nil {
@@ -80,22 +98,14 @@ func getUsernamePassword(usernameFlag string) (string, string, error) {
 		}
 		globalUserName = usernameFlag
 		globalPassword = password
-	} else {
-		globalUserName = usernameFlag[:colon]
-		globalPassword = usernameFlag[colon+1:]
 	}
 	return globalUserName, globalPassword, nil
 }
 
 func mustCreateConn() *clientv3.Client {
-	connEndpoints := leaderEps
-	if len(connEndpoints) == 0 {
-		connEndpoints = []string{endpoints[dialTotal%len(endpoints)]}
-		dialTotal++
-	}
 	cfg := clientv3.Config{
 		AutoSyncInterval: autoSyncInterval,
-		Endpoints:        connEndpoints,
+		Endpoints:        endpoints,
 		DialTimeout:      dialTimeout,
 	}
 	if !tls.Empty() || tls.TrustedCAFile != "" {
@@ -115,16 +125,9 @@ func mustCreateConn() *clientv3.Client {
 		}
 		cfg.Username = username
 		cfg.Password = password
-
 	}
 
 	client, err := clientv3.New(cfg)
-	if targetLeader && len(leaderEps) == 0 {
-		mustFindLeaderEndpoints(client)
-		client.Close()
-		return mustCreateConn()
-	}
-
 	grpclog.SetLoggerV2(grpclog.NewLoggerV2(os.Stderr, os.Stderr, os.Stderr))
 
 	if err != nil {
@@ -158,24 +161,24 @@ func mustRandBytes(n int) []byte {
 	return rb
 }
 
-func newReport() report.Report {
+func newReport(benchmarkOp string) report.Report {
 	p := "%4.4f"
 	if precise {
 		p = "%g"
 	}
 	if sample {
-		return report.NewReportSample(p)
+		return report.NewReportSample(p, benchmarkOp, generatePerfReport)
 	}
-	return report.NewReport(p)
+	return report.NewReport(p, benchmarkOp, generatePerfReport)
 }
 
-func newWeightedReport() report.Report {
+func newWeightedReport(benchmarkOp string) report.Report {
 	p := "%4.4f"
 	if precise {
 		p = "%g"
 	}
 	if sample {
-		return report.NewReportSample(p)
+		return report.NewReportSample(p, benchmarkOp, generatePerfReport)
 	}
-	return report.NewWeightedReport(report.NewReport(p), p)
+	return report.NewWeightedReport(report.NewReport(p, benchmarkOp, generatePerfReport), p, benchmarkOp, generatePerfReport)
 }

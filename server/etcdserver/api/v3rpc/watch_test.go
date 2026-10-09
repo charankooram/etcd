@@ -16,7 +16,9 @@ package v3rpc
 
 import (
 	"bytes"
+	"errors"
 	"math"
+	"reflect"
 	"testing"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -26,7 +28,7 @@ import (
 func TestSendFragment(t *testing.T) {
 	tt := []struct {
 		wr              *pb.WatchResponse
-		maxRequestBytes int
+		maxRequestBytes uint
 		fragments       int
 		werr            error
 	}{
@@ -69,7 +71,7 @@ func TestSendFragment(t *testing.T) {
 			return nil
 		}
 		err := sendFragments(tt[i].wr, tt[i].maxRequestBytes, testSend)
-		if err != tt[i].werr {
+		if !errors.Is(err, tt[i].werr) {
 			t.Errorf("#%d: expected error %v, got %v", i, tt[i].werr, err)
 		}
 		got := len(fragmentedResp)
@@ -79,6 +81,26 @@ func TestSendFragment(t *testing.T) {
 		if got > 0 && fragmentedResp[got-1].Fragment {
 			t.Errorf("#%d: expected fragment=false in last response, got %+v", i, fragmentedResp[got-1])
 		}
+	}
+}
+
+func TestWatchResponseProtoFieldCount(t *testing.T) {
+	const expectedWatchResponseProtoFields = 8
+
+	fields := 0
+	typ := reflect.TypeOf(pb.WatchResponse{})
+	for i := 0; i < typ.NumField(); i++ {
+		if typ.Field(i).Tag.Get("protobuf") != "" {
+			fields++
+		}
+	}
+
+	// NOTE:
+	//
+	// We do manually value-copy in sendFragments. If there is new
+	// protobuf field added to WatchResponse, we need to update sendFragments.
+	if fields != expectedWatchResponseProtoFields {
+		t.Fatalf("unexpected pb.WatchResponse protobuf field count, got=%d expected=%d", fields, expectedWatchResponseProtoFields)
 	}
 }
 

@@ -20,8 +20,9 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
@@ -64,7 +65,7 @@ func TestDowngradeSingleNode(t *testing.T) {
 	c.StepMonitors()
 	assert.Equal(t, newCluster(lg, 1, version.V3_6), c)
 
-	assert.NoError(t, c.Version().DowngradeEnable(context.Background(), &version.V3_5))
+	require.NoError(t, c.Version().DowngradeEnable(t.Context(), &version.V3_5))
 	c.StepMonitors()
 	assert.Equal(t, version.V3_5, c.clusterVersion)
 
@@ -80,7 +81,7 @@ func TestDowngradeThreeNode(t *testing.T) {
 	c.StepMonitors()
 	assert.Equal(t, newCluster(lg, 3, version.V3_6), c)
 
-	assert.NoError(t, c.Version().DowngradeEnable(context.Background(), &version.V3_5))
+	require.NoError(t, c.Version().DowngradeEnable(t.Context(), &version.V3_5))
 	c.StepMonitors()
 	assert.Equal(t, version.V3_5, c.clusterVersion)
 
@@ -100,7 +101,7 @@ func TestNewerMemberCanReconnectDuringDowngrade(t *testing.T) {
 	c.StepMonitors()
 	assert.Equal(t, newCluster(lg, 3, version.V3_6), c)
 
-	assert.NoError(t, c.Version().DowngradeEnable(context.Background(), &version.V3_5))
+	require.NoError(t, c.Version().DowngradeEnable(t.Context(), &version.V3_5))
 	c.StepMonitors()
 	assert.Equal(t, version.V3_5, c.clusterVersion)
 
@@ -126,7 +127,7 @@ func newCluster(lg *zap.Logger, memberCount int, ver semver.Version) *clusterMoc
 		clusterVersion: ver,
 		members:        make([]*memberMock, 0, memberCount),
 	}
-	majorMinVer := semver.Version{Major: ver.Major, Minor: ver.Minor}
+	majorMinVer := *semver.New(ver.Major(), ver.Minor(), 0, "", "")
 	for i := 0; i < memberCount; i++ {
 		m := &memberMock{
 			isRunning:      true,
@@ -209,7 +210,7 @@ type memberMock struct {
 var _ Server = (*memberMock)(nil)
 
 func (m *memberMock) UpdateClusterVersion(version string) {
-	m.cluster.clusterVersion = *semver.New(version)
+	m.cluster.clusterVersion = *semver.MustParse(version)
 }
 
 func (m *memberMock) LinearizableReadNotify(ctx context.Context) error {

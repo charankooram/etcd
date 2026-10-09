@@ -15,7 +15,8 @@
 package model
 
 import (
-	"encoding/json"
+	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,17 +28,15 @@ func TestModelDeterministic(t *testing.T) {
 	for _, tc := range commonTestScenarios {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			state := DeterministicModel.Init()
+			keys := keysFromTestOperations(tc.operations)
+			model := DeterministicModel(keys)
+			state := model.Init()
 			for _, op := range tc.operations {
-				ok, newState := DeterministicModel.Step(state, op.req, op.resp.EtcdResponse)
+				ok, newState := model.Step(state, op.req, op.resp.EtcdResponse)
 				if op.expectFailure == ok {
 					t.Logf("state: %v", state)
-					t.Errorf("Unexpected operation result, expect: %v, got: %v, operation: %s", !op.expectFailure, ok, DeterministicModel.DescribeOperation(op.req, op.resp.EtcdResponse))
-					var loadedState EtcdState
-					err := json.Unmarshal([]byte(state.(string)), &loadedState)
-					if err != nil {
-						t.Fatalf("Failed to load state: %v", err)
-					}
+					t.Errorf("Unexpected operation result, expect: %v, got: %v, operation: %s", !op.expectFailure, ok, model.DescribeOperation(op.req, op.resp.EtcdResponse))
+					loadedState := state.(EtcdState)
 					_, resp := loadedState.Step(op.req)
 					t.Errorf("Response diff: %s", cmp.Diff(op.resp, resp))
 					break
@@ -49,6 +48,170 @@ func TestModelDeterministic(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEtcdStateEqual(t *testing.T) {
+	keys := []string{"key"}
+	testCases := []struct {
+		name  string
+		s1    EtcdState
+		s2    EtcdState
+		equal bool
+	}{
+		{
+			name:  "Fresh states should be equal",
+			s1:    freshEtcdState(keys),
+			s2:    freshEtcdState(keys),
+			equal: true,
+		},
+		{
+			name: "States from identical history should be equal",
+			s1: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "1"))
+				s, _ = s.Step(putRequest("key", "2"))
+				return s
+			}(),
+			s2: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "1"))
+				s, _ = s.Step(putRequest("key", "2"))
+				return s
+			}(),
+			equal: true,
+		},
+		{
+			name: "States from different history should not be equal",
+			s1: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "1"))
+				s, _ = s.Step(putRequest("key", "2"))
+				return s
+			}(),
+			s2: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "2"))
+				s, _ = s.Step(putRequest("key", "1"))
+				return s
+			}(),
+			equal: false,
+		},
+		{
+			name: "Empty states with higher revision should be equal",
+			s1: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "1"))
+				s, _ = s.Step(putRequest("key", "2"))
+				s, _ = s.Step(deleteRequest("key"))
+				return s
+			}(),
+			s2: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "2"))
+				s, _ = s.Step(putRequest("key", "1"))
+				s, _ = s.Step(deleteRequest("key"))
+				return s
+			}(),
+			equal: true,
+		},
+		{
+			name: "Grant and Revoke empty lease should be equal to fresh state",
+			s1:   freshEtcdState(keys),
+			s2: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(leaseGrantRequest(1))
+				s, _ = s.Step(leaseRevokeRequest(1))
+				return s
+			}(),
+			equal: true,
+		},
+		{
+			name: "Delete via Revoke vs Delete directly should be equal",
+			s1: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(leaseGrantRequest(1))
+				s, _ = s.Step(putWithLeaseRequest("key", "val", 1))
+				s, _ = s.Step(leaseRevokeRequest(1))
+				return s
+			}(),
+			s2: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "val"))
+				s, _ = s.Step(deleteRequest("key"))
+				return s
+			}(),
+			equal: true,
+		},
+		{
+			name: "Put via Txn vs Put directly should be equal",
+			s1: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(compareRevisionAndPutRequest("key", 0, "val"))
+				return s
+			}(),
+			s2: func() EtcdState {
+				s := freshEtcdState(keys)
+				s, _ = s.Step(putRequest("key", "val"))
+				return s
+			}(),
+			equal: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.s1.Equal(tc.s2) != tc.equal {
+				t.Errorf("Expected equal=%v, got %v", tc.equal, !tc.equal)
+				t.Errorf("Diff:\n%v", cmp.Diff(tc.s1, tc.s2))
+			}
+		})
+	}
+}
+
+func TestEtcdStateEqualCommutativeRequests(t *testing.T) {
+	commutativeRequests := []EtcdRequest{
+		leaseGrantRequest(1),
+		leaseGrantRequest(2),
+		leaseRevokeRequest(3),
+		leaseRevokeRequest(4),
+		getRequest("key1"),
+		getRequest("key2"),
+		defragmentRequest(),
+		defragmentRequest(),
+		compactRequest(1),
+		compactRequest(2),
+	}
+	keys := []string{"key1", "key2"}
+
+	baseState := applyRequests(keys, commutativeRequests)
+
+	for i := 0; i < 10_000; i++ {
+		perm := slices.Clone(commutativeRequests)
+		rand.Shuffle(len(perm), func(i, j int) {
+			perm[i], perm[j] = perm[j], perm[i]
+		})
+		s2 := applyRequests(keys, perm)
+
+		if !baseState.Equal(s2) {
+			t.Errorf("Expected states to be equal after random reordering, but they are not")
+		}
+	}
+}
+
+func applyRequests(keys []string, reqs []EtcdRequest) EtcdState {
+	state := freshEtcdState(keys)
+	for _, req := range reqs {
+		state, _ = state.Step(req)
+	}
+	return state
+}
+
+func keysFromTestOperations(ops []testOperation) []string {
+	requests := make([]EtcdRequest, 0, len(ops))
+	for _, op := range ops {
+		requests = append(requests, op.req)
+	}
+	return keysFromRequests(requests)
 }
 
 type modelTestCase struct {
@@ -83,8 +246,8 @@ var commonTestScenarios = []modelTestCase{
 		operations: []testOperation{
 			{req: putRequest("key1", "1"), resp: putResponse(2)},
 			{req: putRequest("key2", "2"), resp: putResponse(3)},
-			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2}, {Key: []byte("key2"), Value: []byte("2"), ModRevision: 3}}, 2, 3)},
-			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2}, {Key: []byte("key2"), Value: []byte("2"), ModRevision: 3}}, 2, 3)},
+			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1}, {Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1}}, 2, 3)},
+			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1}, {Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1}}, 2, 3)},
 		},
 	},
 	{
@@ -94,26 +257,26 @@ var commonTestScenarios = []modelTestCase{
 			{req: putRequest("key2", "2"), resp: putResponse(3)},
 			{req: putRequest("key3", "3"), resp: putResponse(4)},
 			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2},
-				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3},
-				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 4},
+				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1},
+				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1},
+				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 4, Version: 1},
 			}, 3, 4)},
 			{req: listRequest("key", 4), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2},
-				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3},
-				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 4},
+				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1},
+				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1},
+				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 4, Version: 1},
 			}, 3, 4)},
 			{req: listRequest("key", 3), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2},
-				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3},
-				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 4},
+				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1},
+				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1},
+				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 4, Version: 1},
 			}, 3, 4)},
 			{req: listRequest("key", 2), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2},
-				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3},
+				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1},
+				{Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1},
 			}, 3, 4)},
 			{req: listRequest("key", 1), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2},
+				{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1},
 			}, 3, 4)},
 		},
 	},
@@ -124,19 +287,19 @@ var commonTestScenarios = []modelTestCase{
 			{req: putRequest("key2", "1"), resp: putResponse(3)},
 			{req: putRequest("key1", "2"), resp: putResponse(4)},
 			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key1"), Value: []byte("2"), ModRevision: 4},
-				{Key: []byte("key2"), Value: []byte("1"), ModRevision: 3},
-				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 2},
+				{Key: []byte("key1"), Value: []byte("2"), ModRevision: 4, Version: 1},
+				{Key: []byte("key2"), Value: []byte("1"), ModRevision: 3, Version: 1},
+				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 2, Version: 1},
 			}, 3, 4)},
 			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key2"), Value: []byte("1"), ModRevision: 3},
-				{Key: []byte("key1"), Value: []byte("2"), ModRevision: 4},
-				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 2},
+				{Key: []byte("key2"), Value: []byte("1"), ModRevision: 3, Version: 1},
+				{Key: []byte("key1"), Value: []byte("2"), ModRevision: 4, Version: 1},
+				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 2, Version: 1},
 			}, 3, 4), expectFailure: true},
 			{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{
-				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 2},
-				{Key: []byte("key2"), Value: []byte("1"), ModRevision: 3},
-				{Key: []byte("key1"), Value: []byte("2"), ModRevision: 4},
+				{Key: []byte("key3"), Value: []byte("3"), ModRevision: 2, Version: 1},
+				{Key: []byte("key2"), Value: []byte("1"), ModRevision: 3, Version: 1},
+				{Key: []byte("key1"), Value: []byte("2"), ModRevision: 4, Version: 1},
 			}, 3, 4), expectFailure: true},
 		},
 	},
@@ -147,7 +310,7 @@ var commonTestScenarios = []modelTestCase{
 			{req: getRequest("key"), resp: getResponse("key", "123456789012345678901", 2, 2), expectFailure: true},
 			{req: getRequest("key"), resp: getResponse("key", "012345678901234567890", 2, 2)},
 			{req: putRequest("key", "123456789012345678901"), resp: putResponse(3)},
-			{req: getRequest("key"), resp: getResponse("key", "123456789012345678901", 3, 3)},
+			{req: getRequest("key"), resp: getResponseWithVer("key", "123456789012345678901", 3, 2, 3)},
 			{req: getRequest("key"), resp: getResponse("key", "012345678901234567890", 3, 3), expectFailure: true},
 		},
 	},
@@ -229,8 +392,8 @@ var commonTestScenarios = []modelTestCase{
 			{req: getRequest("key"), resp: getResponse("key", "1", 2, 2), expectFailure: true},
 			{req: getRequest("key"), resp: getResponse("key", "1", 2, 3), expectFailure: true},
 			{req: getRequest("key"), resp: getResponse("key", "1", 3, 3), expectFailure: true},
-			{req: getRequest("key"), resp: getResponse("key", "2", 2, 2), expectFailure: true},
-			{req: getRequest("key"), resp: getResponse("key", "2", 3, 3)},
+			{req: getRequest("key"), resp: getResponseWithVer("key", "2", 2, 2, 2), expectFailure: true},
+			{req: getRequest("key"), resp: getResponseWithVer("key", "2", 3, 2, 3)},
 		},
 	},
 	{
@@ -240,7 +403,7 @@ var commonTestScenarios = []modelTestCase{
 			{req: compareRevisionAndPutRequest("key1", 0, "2"), resp: compareRevisionAndPutResponse(true, 2)},
 			{req: compareRevisionAndPutRequest("key1", 0, "3"), resp: compareRevisionAndPutResponse(true, 3), expectFailure: true},
 			{req: txnRequestSingleOperation(compareRevision("key1", 0), putOperation("key1", "4"), putOperation("key1", "5")), resp: txnPutResponse(false, 3)},
-			{req: getRequest("key1"), resp: getResponse("key1", "5", 3, 3)},
+			{req: getRequest("key1"), resp: getResponseWithVer("key1", "5", 3, 2, 3)},
 			{req: compareRevisionAndPutRequest("key2", 0, "6"), resp: compareRevisionAndPutResponse(true, 4)},
 		},
 	},
@@ -263,6 +426,13 @@ var commonTestScenarios = []modelTestCase{
 			{req: putWithLeaseRequest("key", "2", 1), resp: putResponse(2)},
 			{req: putWithLeaseRequest("key", "3", 2), resp: putResponse(3), expectFailure: true},
 			{req: getRequest("key"), resp: getResponse("key", "2", 2, 2)},
+		},
+	},
+	{
+		name: "Lease grant returns current revision",
+		operations: []testOperation{
+			{req: putRequest("key", "1"), resp: putResponse(2)},
+			{req: leaseGrantRequest(1), resp: leaseGrantResponse(2)},
 		},
 	},
 	{
@@ -292,7 +462,7 @@ var commonTestScenarios = []modelTestCase{
 			{req: putWithLeaseRequest("key", "2", 1), resp: putResponse(2)},
 			{req: putRequest("key", "3"), resp: putResponse(3)},
 			{req: leaseRevokeRequest(1), resp: leaseRevokeResponse(3)},
-			{req: getRequest("key"), resp: getResponse("key", "3", 3, 3)},
+			{req: getRequest("key"), resp: getResponseWithVer("key", "3", 3, 2, 3)},
 		},
 	},
 	{
@@ -303,7 +473,7 @@ var commonTestScenarios = []modelTestCase{
 			{req: putWithLeaseRequest("key", "2", 1), resp: putResponse(2)},
 			{req: putWithLeaseRequest("key", "3", 2), resp: putResponse(3)},
 			{req: leaseRevokeRequest(1), resp: leaseRevokeResponse(3)},
-			{req: getRequest("key"), resp: getResponse("key", "3", 3, 3)},
+			{req: getRequest("key"), resp: getResponseWithVer("key", "3", 3, 2, 3)},
 			{req: leaseRevokeRequest(2), resp: leaseRevokeResponse(4)},
 			{req: getRequest("key"), resp: emptyGetResponse(4)},
 		},
@@ -314,7 +484,7 @@ var commonTestScenarios = []modelTestCase{
 			{req: leaseGrantRequest(1), resp: leaseGrantResponse(1)},
 			{req: putWithLeaseRequest("key", "2", 1), resp: putResponse(2)},
 			{req: putWithLeaseRequest("key", "3", 1), resp: putResponse(3)},
-			{req: getRequest("key"), resp: getResponse("key", "3", 3, 3)},
+			{req: getRequest("key"), resp: getResponseWithVer("key", "3", 3, 2, 3)},
 		},
 	},
 	{
@@ -382,27 +552,27 @@ var commonTestScenarios = []modelTestCase{
 			{req: getRequest("key"), resp: getResponse("key", "4", 4, 4)},
 			{req: compareRevisionAndPutRequest("key", 4, "5"), resp: compareRevisionAndPutResponse(true, 5)},
 			{req: deleteRequest("key"), resp: deleteResponse(1, 6)},
-			{req: defragmentRequest(), resp: defragmentResponse(6)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 		},
 	},
 	{
 		name: "Defragment success between all other request types",
 		operations: []testOperation{
-			{req: defragmentRequest(), resp: defragmentResponse(1)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: leaseGrantRequest(1), resp: leaseGrantResponse(1)},
-			{req: defragmentRequest(), resp: defragmentResponse(1)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: putWithLeaseRequest("key", "1", 1), resp: putResponse(2)},
-			{req: defragmentRequest(), resp: defragmentResponse(2)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: leaseRevokeRequest(1), resp: leaseRevokeResponse(3)},
-			{req: defragmentRequest(), resp: defragmentResponse(3)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: putRequest("key", "4"), resp: putResponse(4)},
-			{req: defragmentRequest(), resp: defragmentResponse(4)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: getRequest("key"), resp: getResponse("key", "4", 4, 4)},
-			{req: defragmentRequest(), resp: defragmentResponse(4)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: compareRevisionAndPutRequest("key", 4, "5"), resp: compareRevisionAndPutResponse(true, 5)},
-			{req: defragmentRequest(), resp: defragmentResponse(5)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 			{req: deleteRequest("key"), resp: deleteResponse(1, 6)},
-			{req: defragmentRequest(), resp: defragmentResponse(6)},
+			{req: defragmentRequest(), resp: defragmentResponse()},
 		},
 	},
 }

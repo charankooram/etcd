@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -o errexit
 set -o nounset
@@ -33,23 +46,24 @@ help() {
   echo "WARNING: This does not perform the 'Add API capabilities', 'Performance testing' "
   echo "         or 'Documentation' steps. These steps must be performed manually BEFORE running this tool."
   echo ""
-  echo "WARNING: This script does not sign releases, publish releases to github or sent announcement"
-  echo "         emails. These steps must be performed manually AFTER running this tool."
+  echo "WARNING: This script does not send announcement emails. This step must be performed manually AFTER running this tool."
   echo ""
   echo "  args:"
   echo "    version: version of etcd to release, e.g. 'v3.2.18'"
   echo "  flags:"
-  echo "    --no-upload: skip gs://etcd binary artifact uploads."
-  echo "    --no-docker-push: skip docker image pushes."
   echo "    --in-place: build binaries using current branch."
+  echo "    --no-docker-push: skip docker image pushes."
+  echo "    --no-gh-release: skip creating the GitHub release using gh."
+  echo "    --no-upload: skip gs://etcd binary artifact uploads."
   echo ""
   echo "One can perform a (dry-run) test release from any (uncommitted) branch using:"
   echo "  DRY_RUN=true REPOSITORY=\`pwd\` BRANCH='local-branch-name' ./scripts/release 3.5.0-foobar.2"
 }
 
 main() {
-  VERSION=$1
-  if [[ ! "${VERSION}" =~ [0-9]+.[0-9]+.[0-9]+ ]]; then
+  # Allow to receive the version with the "v" prefix, i.e. v3.6.0.
+  VERSION=${1#v}
+  if [[ ! "${VERSION}" =~ ^[0-9]+.[0-9]+.[0-9]+ ]]; then
     log_error "Expected 'version' param of the form '<major-version>.<minor-version>.<patch-version>' but got '${VERSION}'"
     exit 1
   fi
@@ -61,7 +75,7 @@ main() {
       REPOSITORY=$(pwd)
       BRANCH=$(git rev-parse --abbrev-ref HEAD)
   else
-      REPOSITORY=${REPOSITORY:-"https://github.com/etcd-io/etcd.git"}
+      REPOSITORY=${REPOSITORY:-"git@github.com:etcd-io/etcd.git"}
       BRANCH=${BRANCH:-"release-${MINOR_VERSION}"}
   fi
 
@@ -86,10 +100,12 @@ main() {
   # Set up release directory.
   local reldir="/tmp/etcd-release-${VERSION}"
   log_callout "Preparing temporary directory: ${reldir}"
-  if [ ! -d "${reldir}/etcd" ] && [ "${IN_PLACE}" == 0 ]; then
-    mkdir -p "${reldir}"
-    cd "${reldir}"
-    run git clone "${REPOSITORY}" --branch "${BRANCH}"
+  if [ "${IN_PLACE}" == 0 ]; then
+    if [ ! -d "${reldir}/etcd" ]; then
+      mkdir -p "${reldir}"
+      cd "${reldir}"
+      run git clone "${REPOSITORY}" --branch "${BRANCH}" --depth 1
+    fi
     run cd "${reldir}/etcd" || exit 2
     run git checkout "${BRANCH}" || exit 2
     run git pull origin
@@ -119,6 +135,21 @@ main() {
     exit 1
   fi
 
+  if [ "${NO_GH_RELEASE}" == 1 ]; then
+    log_callout "Skipping gh verification, --no-gh-release is set"
+  else
+    # Check that gh is installed and logged in.
+    log_callout "Check gh installation"
+    if ! command -v gh >/dev/null; then
+      log_error "Cannot find gh. Please follow the installation instructions at https://github.com/cli/cli#installation"
+      exit 1
+    fi
+    if ! gh auth status &>/dev/null; then
+      log_error "GitHub authentication failed for gh. Please run gh auth login."
+      exit 1
+    fi
+  fi
+
   # If the release tag does not already exist remotely, create it.
   log_callout "Create tag if not present"
   if [ "${remote_tag_exists}" -eq 0 ]; then
@@ -126,7 +157,7 @@ main() {
     local source_version
     source_version=$(grep -E "\s+Version\s*=" api/version/version.go | sed -e "s/.*\"\(.*\)\".*/\1/g")
     if [[ "${source_version}" != "${VERSION}" ]]; then
-      source_minor_version=$(echo "${source_version}" | cut -d. -f 1-2)
+      source_minor_version=$(echo "${source_version}" | cut -d. -f 1-2 | sed 's/^v//')
       if [[ "${source_minor_version}" != "${MINOR_VERSION}" ]]; then
         log_error "Wrong etcd minor version in api/version/version.go. Expected ${MINOR_VERSION} but got ${source_minor_version}. Aborting."
         exit 1
@@ -154,7 +185,7 @@ main() {
       # shellcheck disable=SC2038,SC2046
       run git add $(find . -name go.mod ! -path './release/*'| xargs)
       run git diff --staged | cat
-      run git commit -m "version: bump up to ${VERSION}"
+      run git commit --signoff --message "version: bump up to ${VERSION}"
       run git diff --staged | cat
     fi
 
@@ -166,7 +197,7 @@ main() {
     fi
 
     # Tag release.
-    if [ "$(git tag --list | grep -c "${RELEASE_VERSION}")" -gt 0 ]; then
+    if git tag --list | grep --quiet "^${RELEASE_VERSION}$"; then
       log_callout "Skipping tag step. git tag ${RELEASE_VERSION} already exists."
     else
       log_callout "Tagging release..."
@@ -213,7 +244,36 @@ main() {
     log_warning "Skipping release build step. /release directory already exists."
   else
     log_callout "Building release..."
-    REPOSITORY=$(pwd) ./scripts/build-release.sh "${RELEASE_VERSION}"
+
+    if [ "${DRY_RUN}" == "true" ] || [ "${NO_DOCKER_PUSH}" == 1 ]; then
+      log_callout "Skipping docker push. --no-docker-push flag is set."
+      # Explicitly set NO_DOCKER_PUSH to 1, if DRY_RUN is true.
+      NO_DOCKER_PUSH=1
+    else
+      read -p "Publish etcd ${RELEASE_VERSION} docker images to registries [y/N]? " -r confirm
+      if [[ "${confirm,,}" == "y" ]]; then
+        local registries=("gcr.io" "quay.io")
+        if [ -n "${OCI_REGISTRY:-}" ]; then
+          registries=("${OCI_REGISTRY}")
+        fi
+        for _ in {1..5}; do
+          local login_succeeded=true
+          for registry in "${registries[@]}"; do
+            if ! docker login "${registry}"; then
+              login_succeeded=false
+              log_warning "login failed, retrying"
+            fi
+          done
+          if [[ "${login_succeeded}" == "true" ]]; then
+            break
+          fi
+        done
+      else
+        NO_DOCKER_PUSH=1
+      fi
+    fi
+
+    OCI_REGISTRY="${OCI_REGISTRY:-}" OCI_PATH="${OCI_PATH:-}" REPOSITORY=$(pwd) ./scripts/build-release.sh "${RELEASE_VERSION}" "${NO_DOCKER_PUSH}"
   fi
 
   # Sanity checks.
@@ -236,7 +296,7 @@ main() {
 
   # Upload artifacts.
   if [ "${DRY_RUN}" == "true" ] || [ "${NO_UPLOAD}" == 1 ]; then
-    log_callout "Skipping artifact upload to gs://etcd. --no-upload flat is set."
+    log_callout "Skipping artifact upload to gs://etcd. --no-upload flag is set."
   else
     read -p "Upload etcd ${RELEASE_VERSION} release artifacts to gs://etcd [y/N]? " -r confirm
     [[ "${confirm,,}" == "y" ]] || exit 1
@@ -246,53 +306,16 @@ main() {
     maybe_run gsutil -m acl ch -u allUsers:R -r "gs://etcd/${RELEASE_VERSION}/"
   fi
 
-  # Push images.
-  if [ "${DRY_RUN}" == "true" ] || [ "${NO_DOCKER_PUSH}" == 1 ]; then
-    log_callout "Skipping docker push. --no-docker-push flat is set."
-  else
-    read -p "Publish etcd ${RELEASE_VERSION} docker images to quay.io [y/N]? " -r confirm
-    [[ "${confirm,,}" == "y" ]] || exit 1
-    # shellcheck disable=SC2034
-    for i in {1..5}; do
-      docker login quay.io && break
-      log_warning "login failed, retrying"
-    done
-
-    for TARGET_ARCH in "amd64" "arm64" "ppc64le" "s390x"; do
-      log_callout "Pushing container images to quay.io ${RELEASE_VERSION}-${TARGET_ARCH}"
-      maybe_run docker push "quay.io/coreos/etcd:${RELEASE_VERSION}-${TARGET_ARCH}"
-      log_callout "Pushing container images to gcr.io ${RELEASE_VERSION}-${TARGET_ARCH}"
-      maybe_run docker push "gcr.io/etcd-development/etcd:${RELEASE_VERSION}-${TARGET_ARCH}"
-    done
-
-    log_callout "Creating manifest-list (multi-image)..."
-
-    for TARGET_ARCH in "amd64" "arm64" "ppc64le" "s390x"; do
-      maybe_run docker manifest create --amend "quay.io/coreos/etcd:${RELEASE_VERSION}" "quay.io/coreos/etcd:${RELEASE_VERSION}-${TARGET_ARCH}"
-      maybe_run docker manifest annotate "quay.io/coreos/etcd:${RELEASE_VERSION}" "quay.io/coreos/etcd:${RELEASE_VERSION}-${TARGET_ARCH}" --arch "${TARGET_ARCH}"
-
-      maybe_run docker manifest create --amend "gcr.io/etcd-development/etcd:${RELEASE_VERSION}" "gcr.io/etcd-development/etcd:${RELEASE_VERSION}-${TARGET_ARCH}"
-      maybe_run docker manifest annotate "gcr.io/etcd-development/etcd:${RELEASE_VERSION}" "gcr.io/etcd-development/etcd:${RELEASE_VERSION}-${TARGET_ARCH}" --arch "${TARGET_ARCH}"
-    done
-
-    log_callout "Pushing container manifest list to quay.io ${RELEASE_VERSION}"
-    maybe_run docker manifest push "quay.io/coreos/etcd:${RELEASE_VERSION}"
-
-    log_callout "Pushing container manifest list to gcr.io ${RELEASE_VERSION}"
-    maybe_run docker manifest push "gcr.io/etcd-development/etcd:${RELEASE_VERSION}"
-
-    log_callout "Setting permissions using gsutil..."
-    maybe_run gsutil -m acl ch -u allUsers:R -r gs://artifacts.etcd-development.appspot.com
-  fi
-
   ### Release validation
   mkdir -p downloads
 
   # Check image versions
-  for IMAGE in "quay.io/coreos/etcd:${RELEASE_VERSION}" "gcr.io/etcd-development/etcd:${RELEASE_VERSION}"; do
-    if [ "${DRY_RUN}" == "true" ] || [ "${NO_DOCKER_PUSH}" == 1 ]; then
-      IMAGE="${IMAGE}-amd64"
-    fi
+  local images=("quay.io/coreos/etcd:${RELEASE_VERSION}" "gcr.io/etcd-development/etcd:${RELEASE_VERSION}")
+  if [ -n "${OCI_REGISTRY:-}" ]; then
+    images=("${OCI_REGISTRY}/${OCI_PATH:-etcd}:${RELEASE_VERSION}")
+  fi
+
+  for IMAGE in "${images[@]}"; do
     # shellcheck disable=SC2155
     local image_version=$(docker run --rm "${IMAGE}" etcd --version | grep "etcd Version" | awk -F: '{print $2}' | tr -d '[:space:]')
     if [ "${image_version}" != "${VERSION}" ]; then
@@ -317,10 +340,71 @@ main() {
     exit 1
   fi
 
-  # TODO: signing process
-  log_warning ""
-  log_warning "WARNING: The release has not been signed and published to github. This must be done manually."
-  log_warning ""
+  if [ "${DRY_RUN}" == "true" ] || [ "${NO_GH_RELEASE}" == 1 ]; then
+    log_warning ""
+    log_warning "WARNING: Skipping creating GitHub release, --no-gh-release is set."
+    log_warning "WARNING: If not running on DRY_MODE, please do the GitHub release manually."
+    log_warning ""
+  else
+    local gh_repo
+    local release_notes_temp_file
+    local release_url
+    local gh_release_args=()
+
+    # For the main branch (v3.6), we should mark the release as a prerelease.
+    # The release-3.5 (v3.5) branch, should be marked as latest. And release-3.4 (v3.4)
+    # should be left without any additional mark (therefore, it doesn't need a special argument).
+    if [ "${BRANCH}" = "main" ]; then
+      gh_release_args=(--prerelease)
+    elif [ "${BRANCH}" = "release-3.5" ]; then
+      gh_release_args=(--latest)
+    fi
+
+    if [ "${REPOSITORY}" = "$(pwd)" ]; then
+      gh_repo=$(git remote get-url origin)
+    else
+      gh_repo="${REPOSITORY}"
+    fi
+
+    gh_repo=$(echo "${gh_repo}" | sed 's/^[^@]\+@//' | sed 's/https\?:\/\///' | sed 's/\.git$//' | tr ':' '/')
+    log_callout "Creating GitHub release for ${RELEASE_VERSION} on ${gh_repo}"
+
+    release_notes_temp_file=$(mktemp)
+
+    local release_version=${RELEASE_VERSION#v} # Remove the v prefix from the release version (i.e., v3.6.1 -> 3.6.1)
+    local release_version_major_minor
+    release_version_major_minor=$(echo "${release_version}" | cut -d. -f1-2) # Remove the patch from the version (i.e., 3.6)
+    local release_version_major=${release_version_major_minor%.*} # Extract the major (i.e., 3)
+    local release_version_minor=${release_version_major_minor/*./} # Extract the minor (i.e., 6)
+
+    # Disable sellcheck SC2016, the single quoted syntax for sed is intentional.
+    # shellcheck disable=SC2016
+    sed 's/${RELEASE_VERSION}/'"${RELEASE_VERSION}"'/g' ./scripts/release_notes.tpl.txt |
+      sed 's/${RELEASE_VERSION_MAJOR_MINOR}/'"${release_version_major_minor}"'/g' |
+      sed 's/${RELEASE_VERSION_MAJOR}/'"${release_version_major}"'/g' |
+      sed 's/${RELEASE_VERSION_MINOR}/'"${release_version_minor}"'/g' > "${release_notes_temp_file}"
+
+    if ! gh --repo "${gh_repo}" release view "${RELEASE_VERSION}" &>/dev/null; then
+      maybe_run gh release create "${RELEASE_VERSION}" \
+          --repo "${gh_repo}" \
+          --draft \
+          --title "${RELEASE_VERSION}" \
+          --notes-file "${release_notes_temp_file}" \
+          "${gh_release_args[@]}"
+    fi
+
+    # Upload files one by one, as gh doesn't support passing globs as input.
+    maybe_run find ./release '(' -name '*.tar.gz' -o -name '*.zip' ')' -exec \
+      gh --repo "${gh_repo}" release upload "${RELEASE_VERSION}" {} --clobber \;
+    maybe_run gh --repo "${gh_repo}" release upload "${RELEASE_VERSION}" ./release/SHA256SUMS --clobber
+
+    release_url=$(gh --repo "${gh_repo}" release view "${RELEASE_VERSION}" --json url --jq '.url')
+
+    log_warning ""
+    log_warning "WARNING: The GitHub release for ${RELEASE_VERSION} has been created as a draft, please go to ${release_url} and release it."
+    log_warning ""
+  fi
+
   log_success "Success."
   exit 0
 }
@@ -329,6 +413,7 @@ POSITIONAL=()
 NO_UPLOAD=0
 NO_DOCKER_PUSH=0
 IN_PLACE=0
+NO_GH_RELEASE=0
 
 while test $# -gt 0; do
         case "$1" in
@@ -347,6 +432,10 @@ while test $# -gt 0; do
             ;;
           --no-docker-push)
             NO_DOCKER_PUSH=1
+            shift
+            ;;
+          --no-gh-release)
+            NO_GH_RELEASE=1
             shift
             ;;
           *)

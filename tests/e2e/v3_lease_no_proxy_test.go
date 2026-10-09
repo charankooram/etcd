@@ -21,8 +21,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
@@ -32,38 +34,46 @@ import (
 // by old leader.
 // See the case 1 in https://github.com/etcd-io/etcd/issues/15247#issuecomment-1777862093.
 func TestLeaseRevoke_IgnoreOldLeader(t *testing.T) {
-	testLeaseRevokeIssue(t, true)
+	t.Run("3 members", func(t *testing.T) {
+		testLeaseRevokeIssue(t, 3, true)
+	})
+	t.Run("5 members", func(t *testing.T) {
+		testLeaseRevokeIssue(t, 5, true)
+	})
 }
 
 // TestLeaseRevoke_ClientSwitchToOtherMember verifies that leases shouldn't
 // be revoked by new leader.
 // See the case 2 in https://github.com/etcd-io/etcd/issues/15247#issuecomment-1777862093.
 func TestLeaseRevoke_ClientSwitchToOtherMember(t *testing.T) {
-	testLeaseRevokeIssue(t, false)
+	t.Run("3 members", func(t *testing.T) {
+		testLeaseRevokeIssue(t, 3, false)
+	})
+	t.Run("5 members", func(t *testing.T) {
+		testLeaseRevokeIssue(t, 5, false)
+	})
 }
 
-func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
+func testLeaseRevokeIssue(t *testing.T, clusterSize int, connectToOneFollower bool) {
 	e2e.BeforeTest(t)
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Log("Starting a new etcd cluster")
 	epc, err := e2e.NewEtcdProcessCluster(ctx, t,
-		e2e.WithClusterSize(3),
+		e2e.WithClusterSize(clusterSize),
 		e2e.WithGoFailEnabled(true),
 		e2e.WithGoFailClientTimeout(40*time.Second),
 	)
 	require.NoError(t, err)
 	defer func() {
-		if errC := epc.Close(); errC != nil {
-			t.Fatalf("error closing etcd processes (%v)", errC)
-		}
+		require.NoErrorf(t, epc.Close(), "error closing etcd processes")
 	}()
 
 	leaderIdx := epc.WaitLeader(t)
 	t.Logf("Leader index: %d", leaderIdx)
 
-	epsForNormalOperations := epc.Procs[(leaderIdx+2)%3].EndpointsGRPC()
+	epsForNormalOperations := epc.Procs[(leaderIdx+2)%clusterSize].EndpointsGRPC()
 	t.Logf("Creating a client for normal operations: %v", epsForNormalOperations)
 	client, err := clientv3.New(clientv3.Config{Endpoints: epsForNormalOperations, DialTimeout: 3 * time.Second})
 	require.NoError(t, err)
@@ -71,7 +81,7 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 
 	var epsForLeaseKeepAlive []string
 	if connectToOneFollower {
-		epsForLeaseKeepAlive = epc.Procs[(leaderIdx+1)%3].EndpointsGRPC()
+		epsForLeaseKeepAlive = epc.Procs[(leaderIdx+1)%clusterSize].EndpointsGRPC()
 	} else {
 		epsForLeaseKeepAlive = epc.EndpointsGRPC()
 	}
@@ -82,7 +92,7 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 
 	resp, err := client.Status(ctx, epsForNormalOperations[0])
 	require.NoError(t, err)
-	oldLeaderId := resp.Leader
+	oldLeaderID := resp.Leader
 
 	t.Log("Creating a new lease")
 	leaseRsp, err := client.Grant(ctx, 20)
@@ -96,7 +106,7 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 		defer close(doneC)
 
 		respC, kerr := clientForKeepAlive.KeepAlive(ctx, leaseRsp.ID)
-		require.NoError(t, kerr)
+		assert.NoError(t, kerr)
 		// ensure we have received the first response from the server
 		<-respC
 		startC <- struct{}{}
@@ -117,12 +127,12 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 	err = epc.Procs[leaderIdx].Failpoints().SetupHTTP(ctx, "raftBeforeSave", `sleep("30s")`)
 	require.NoError(t, err)
 
-	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Logf("Waiting for a new leader to be elected, old leader index: %d, old leader ID: %d", leaderIdx, oldLeaderId)
+	cctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Logf("Waiting for a new leader to be elected, old leader index: %d, old leader ID: %d", leaderIdx, oldLeaderID)
 	testutils.ExecuteUntil(cctx, t, func() {
 		for {
 			resp, err = client.Status(ctx, epsForNormalOperations[0])
-			if err == nil && resp.Leader != oldLeaderId {
+			if err == nil && resp.Leader != oldLeaderID {
 				t.Logf("A new leader has already been elected, new leader index: %d", resp.Leader)
 				return
 			}
@@ -149,9 +159,66 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 	t.Log("Confirming the lease isn't revoked")
 	leases, err := client.Leases(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, len(leases.Leases))
+	require.Len(t, leases.Leases, 1)
 
 	t.Log("Waiting for the keepAlive goroutine to exit")
 	close(stopC)
 	<-doneC
+}
+
+func TestLeaseRevokeDuringRenew(t *testing.T) {
+	e2e.BeforeTest(t)
+
+	ctx := t.Context()
+
+	t.Log("Starting a new etcd cluster")
+	epc, err := e2e.NewEtcdProcessCluster(ctx, t,
+		e2e.WithClusterSize(1),
+		e2e.WithGoFailEnabled(true),
+		e2e.WithGoFailClientTimeout(40*time.Second),
+	)
+	require.NoError(t, err)
+	defer func() {
+		require.NoErrorf(t, epc.Close(), "error closing etcd processes")
+	}()
+
+	eps := epc.Procs[0].EndpointsGRPC()
+	t.Logf("Creating two clients for lease operations: %v", eps)
+	clientForRenew, err := clientv3.New(clientv3.Config{Endpoints: eps, DialTimeout: 3 * time.Second})
+	require.NoError(t, err)
+	defer clientForRenew.Close()
+
+	clientForRevoke, err := clientv3.New(clientv3.Config{Endpoints: eps, DialTimeout: 3 * time.Second})
+	require.NoError(t, err)
+	defer clientForRevoke.Close()
+
+	t.Log("Creating a new lease")
+	leaseRsp, err := clientForRenew.Grant(ctx, 60)
+	require.NoError(t, err)
+
+	t.Log("Activate the 'beforeCheckpointInLeaseRenew' failpoint")
+	require.NoError(t, epc.Procs[0].Failpoints().SetupHTTP(ctx, "beforeCheckpointInLeaseRenew", `sleep("3s")`))
+
+	t.Logf("Starting a goroutine to keep alive the lease: %d", leaseRsp.ID)
+	doneC := make(chan struct{})
+	startC := make(chan struct{}, 1)
+	var renewError error
+	go func() {
+		defer close(doneC)
+		startC <- struct{}{}
+		_, renewError = clientForRenew.KeepAliveOnce(ctx, leaseRsp.ID)
+	}()
+
+	t.Log("Wait for the KeepAliveOnce goroutine to get started")
+	<-startC
+	time.Sleep(200 * time.Millisecond)
+
+	t.Logf("Revoke the lease: %d", leaseRsp.ID)
+	_, lerr := clientForRevoke.Revoke(ctx, leaseRsp.ID)
+	require.NoError(t, lerr)
+
+	t.Log("Waiting for the keepAlive goroutine to exit")
+	<-doneC
+
+	require.ErrorIs(t, rpctypes.ErrLeaseNotFound, renewError)
 }

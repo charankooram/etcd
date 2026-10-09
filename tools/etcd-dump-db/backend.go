@@ -20,12 +20,14 @@ import (
 	"path/filepath"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/authpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/server/v3/lease/leasepb"
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 )
 
@@ -34,9 +36,9 @@ func snapDir(dataDir string) string {
 }
 
 func getBuckets(dbPath string) (buckets []string, err error) {
-	db, derr := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: flockTimeout})
+	db, derr := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: flockTimeout})
 	if derr != nil {
-		return nil, fmt.Errorf("failed to open bolt DB %v", derr)
+		return nil, fmt.Errorf("failed to open bolt DB %w", derr)
 	}
 	defer db.Close()
 
@@ -63,26 +65,14 @@ var decoders = map[string]decoder{
 	"meta":      metaDecoder,
 }
 
-type revision struct {
-	main int64
-	sub  int64
-}
-
-func bytesToRev(bytes []byte) revision {
-	return revision{
-		main: int64(binary.BigEndian.Uint64(bytes[0:8])),
-		sub:  int64(binary.BigEndian.Uint64(bytes[9:])),
-	}
-}
-
 func defaultDecoder(k, v []byte) {
 	fmt.Printf("key=%q, value=%q\n", k, v)
 }
 
 func keyDecoder(k, v []byte) {
-	rev := bytesToRev(k)
+	rev := mvcc.BytesToBucketKey(k)
 	var kv mvccpb.KeyValue
-	if err := kv.Unmarshal(v); err != nil {
+	if err := proto.Unmarshal(v, &kv); err != nil {
 		panic(err)
 	}
 	fmt.Printf("rev=%+v, value=[key %q | val %q | created %d | mod %d | ver %d]\n", rev, string(kv.Key), string(kv.Value), kv.CreateRevision, kv.ModRevision, kv.Version)
@@ -98,7 +88,7 @@ func bytesToLeaseID(bytes []byte) int64 {
 func leaseDecoder(k, v []byte) {
 	leaseID := bytesToLeaseID(k)
 	var lpb leasepb.Lease
-	if err := lpb.Unmarshal(v); err != nil {
+	if err := proto.Unmarshal(v, &lpb); err != nil {
 		panic(err)
 	}
 	fmt.Printf("lease ID=%016x, TTL=%ds, remaining TTL=%ds\n", leaseID, lpb.TTL, lpb.RemainingTTL)
@@ -115,7 +105,7 @@ func authDecoder(k, v []byte) {
 
 func authRolesDecoder(_, v []byte) {
 	role := &authpb.Role{}
-	err := role.Unmarshal(v)
+	err := proto.Unmarshal(v, role)
 	if err != nil {
 		panic(err)
 	}
@@ -124,7 +114,7 @@ func authRolesDecoder(_, v []byte) {
 
 func authUsersDecoder(_, v []byte) {
 	user := &authpb.User{}
-	err := user.Unmarshal(v)
+	err := proto.Unmarshal(v, user)
 	if err != nil {
 		panic(err)
 	}
@@ -135,7 +125,7 @@ func metaDecoder(k, v []byte) {
 	if string(k) == string(schema.MetaConsistentIndexKeyName) || string(k) == string(schema.MetaTermKeyName) {
 		fmt.Printf("key=%q, value=%v\n", k, binary.BigEndian.Uint64(v))
 	} else if string(k) == string(schema.ScheduledCompactKeyName) || string(k) == string(schema.FinishedCompactKeyName) {
-		rev := bytesToRev(v)
+		rev := mvcc.BytesToRev(v)
 		fmt.Printf("key=%q, value=%v\n", k, rev)
 	} else {
 		defaultDecoder(k, v)
@@ -143,9 +133,9 @@ func metaDecoder(k, v []byte) {
 }
 
 func iterateBucket(dbPath, bucket string, limit uint64, decode bool) (err error) {
-	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: flockTimeout})
+	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: flockTimeout})
 	if err != nil {
-		return fmt.Errorf("failed to open bolt DB %v", err)
+		return fmt.Errorf("failed to open bolt DB %w", err)
 	}
 	defer db.Close()
 

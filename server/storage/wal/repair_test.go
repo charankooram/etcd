@@ -18,12 +18,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
 	"go.etcd.io/raft/v3/raftpb"
 )
@@ -44,7 +46,7 @@ func TestRepairTruncate(t *testing.T) {
 	testRepair(t, makeEnts(10), corruptf, 9)
 }
 
-func testRepair(t *testing.T, ents [][]raftpb.Entry, corrupt corruptFunc, expectedEnts int) {
+func testRepair(t *testing.T, ents [][]*raftpb.Entry, corrupt corruptFunc, expectedEnts int) {
 	lg := zaptest.NewLogger(t)
 	p := t.TempDir()
 
@@ -57,7 +59,7 @@ func testRepair(t *testing.T, ents [][]raftpb.Entry, corrupt corruptFunc, expect
 	require.NoError(t, err)
 
 	for _, es := range ents {
-		require.NoError(t, w.Save(raftpb.HardState{}, es))
+		require.NoError(t, w.Save(&raftpb.HardState{}, es))
 	}
 
 	offset, err := w.tail().Seek(0, io.SeekCurrent)
@@ -67,7 +69,7 @@ func testRepair(t *testing.T, ents [][]raftpb.Entry, corrupt corruptFunc, expect
 	require.NoError(t, corrupt(p, offset))
 
 	// verify we broke the wal
-	w, err = Open(zaptest.NewLogger(t), p, walpb.Snapshot{})
+	w, err = Open(zaptest.NewLogger(t), p, &walpb.Snapshot{})
 	require.NoError(t, err)
 
 	_, _, _, err = w.ReadAll()
@@ -75,10 +77,18 @@ func testRepair(t *testing.T, ents [][]raftpb.Entry, corrupt corruptFunc, expect
 	require.NoError(t, w.Close())
 
 	// repair the wal
-	require.True(t, Repair(lg, p), "'Repair' returned 'false', want 'true'")
+	require.True(t, Repair(lg, p))
+
+	// verify the broken wal has correct permissions
+	bf := filepath.Join(p, filepath.Base(w.tail().Name())+".broken")
+	fi, err := os.Stat(bf)
+	require.NoError(t, err)
+	expectedPerms := fmt.Sprintf("%o", os.FileMode(fileutil.PrivateFileMode))
+	actualPerms := fmt.Sprintf("%o", fi.Mode().Perm())
+	require.Equalf(t, expectedPerms, actualPerms, "unexpected file permissions on .broken wal")
 
 	// read it back
-	w, err = Open(lg, p, walpb.Snapshot{})
+	w, err = Open(lg, p, &walpb.Snapshot{})
 	require.NoError(t, err)
 
 	_, _, walEnts, err := w.ReadAll()
@@ -87,22 +97,22 @@ func testRepair(t *testing.T, ents [][]raftpb.Entry, corrupt corruptFunc, expect
 
 	// write some more entries to repaired log
 	for i := 1; i <= 10; i++ {
-		es := []raftpb.Entry{{Index: uint64(expectedEnts + i)}}
-		require.NoError(t, w.Save(raftpb.HardState{}, es))
+		es := []*raftpb.Entry{{Index: new(uint64(expectedEnts + i))}}
+		require.NoError(t, w.Save(&raftpb.HardState{}, es))
 	}
 	require.NoError(t, w.Close())
 
 	// read back entries following repair, ensure it's all there
-	w, err = Open(lg, p, walpb.Snapshot{})
+	w, err = Open(lg, p, &walpb.Snapshot{})
 	require.NoError(t, err)
 	_, _, walEnts, err = w.ReadAll()
 	require.NoError(t, err)
 	assert.Len(t, walEnts, expectedEnts+10)
 }
 
-func makeEnts(ents int) (ret [][]raftpb.Entry) {
+func makeEnts(ents int) (ret [][]*raftpb.Entry) {
 	for i := 1; i <= ents; i++ {
-		ret = append(ret, []raftpb.Entry{{Index: uint64(i)}})
+		ret = append(ret, []*raftpb.Entry{{Index: new(uint64(i))}})
 	}
 	return ret
 }
@@ -167,7 +177,7 @@ func TestRepairFailDeleteDir(t *testing.T) {
 		SegmentSizeBytes = oldSegmentSizeBytes
 	}()
 	for _, es := range makeEnts(50) {
-		if err = w.Save(raftpb.HardState{}, es); err != nil {
+		if err = w.Save(&raftpb.HardState{}, es); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -187,18 +197,14 @@ func TestRepairFailDeleteDir(t *testing.T) {
 	}
 	f.Close()
 
-	w, err = Open(zaptest.NewLogger(t), p, walpb.Snapshot{})
+	w, err = Open(zaptest.NewLogger(t), p, &walpb.Snapshot{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, err = w.ReadAll()
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("err = %v, want error %v", err, io.ErrUnexpectedEOF)
-	}
+	require.ErrorIsf(t, err, io.ErrUnexpectedEOF, "err = %v, want error %v", err, io.ErrUnexpectedEOF)
 	w.Close()
 
 	os.RemoveAll(p)
-	if Repair(zaptest.NewLogger(t), p) {
-		t.Fatal("expect 'Repair' fail on unexpected directory deletion")
-	}
+	require.Falsef(t, Repair(zaptest.NewLogger(t), p), "expect 'Repair' fail on unexpected directory deletion")
 }

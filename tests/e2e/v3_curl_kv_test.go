@@ -18,7 +18,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	protov1 "github.com/golang/protobuf/proto"
+	protov1 "github.com/golang/protobuf/proto" //nolint:staticcheck // TODO: remove for a supported version
 	gw "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -164,7 +164,7 @@ func testCurlV3KVTxn(cx ctlCtx) {
 
 	succeeded, responses := mustExecuteTxn(cx, string(jsonDat))
 	require.True(cx.t, succeeded)
-	require.Equal(cx.t, 1, len(responses))
+	require.Len(cx.t, responses, 1)
 	putResponse := responses[0].(map[string]any)
 	_, ok := putResponse["response_put"]
 	require.True(cx.t, ok)
@@ -185,7 +185,7 @@ func mustExecuteTxn(cx ctlCtx, reqData string) (bool, []any) {
 		Endpoint: "/v3/kv/txn",
 		Value:    reqData,
 	})
-	resp, err := runCommandAndReadJsonOutput(args)
+	resp, err := runCommandAndReadJSONOutput(args)
 	require.NoError(cx.t, err)
 
 	succeeded, ok := resp["succeeded"]

@@ -52,6 +52,7 @@ type ServerHealth interface {
 	Range(context.Context, *pb.RangeRequest) (*pb.RangeResponse, error)
 	Config() config.ServerConfig
 	AuthStore() auth.AuthStore
+	IsLearner() bool
 }
 
 // HandleHealth registers metrics and health handlers. it checks health by using v3 range request
@@ -72,7 +73,7 @@ func HandleHealth(lg *zap.Logger, mux *http.ServeMux, srv ServerHealth) {
 }
 
 // NewHealthHandler handles '/health' requests.
-func NewHealthHandler(lg *zap.Logger, hfunc func(ctx context.Context, excludedAlarms StringSet, Serializable bool) Health) http.HandlerFunc {
+func NewHealthHandler(lg *zap.Logger, hfunc func(ctx context.Context, excludedAlarms StringSet, serializable bool) Health) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -119,20 +120,22 @@ var (
 		Name:      "health_failures",
 		Help:      "The total number of failed health checks",
 	})
-	healthCheckGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "etcd",
-		Subsystem: "server",
-		Name:      "healthcheck",
-		Help:      "The result of each kind of healthcheck.",
-	},
+	healthCheckGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "healthcheck",
+			Help:      "The result of each kind of healthcheck.",
+		},
 		[]string{"type", "name"},
 	)
-	healthCheckCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "etcd",
-		Subsystem: "server",
-		Name:      "healthchecks_total",
-		Help:      "The total number of each kind of healthcheck.",
-	},
+	healthCheckCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "healthchecks_total",
+			Help:      "The total number of each kind of healthcheck.",
+		},
 		[]string{"type", "name", "status"},
 	)
 )
@@ -240,7 +243,7 @@ type CheckRegistry struct {
 func installLivezEndpoints(lg *zap.Logger, mux *http.ServeMux, server ServerHealth) {
 	reg := CheckRegistry{checkType: checkTypeLivez, checks: make(map[string]HealthCheck)}
 	reg.Register("serializable_read", readCheck(server, true /* serializable */))
-	reg.InstallHttpEndpoints(lg, mux)
+	reg.InstallHTTPEndpoints(lg, mux)
 }
 
 func installReadyzEndpoints(lg *zap.Logger, mux *http.ServeMux, server ServerHealth) {
@@ -252,7 +255,9 @@ func installReadyzEndpoints(lg *zap.Logger, mux *http.ServeMux, server ServerHea
 	reg.Register("serializable_read", readCheck(server, true))
 	// linearizable_read check would be replaced by read_index check in 3.6
 	reg.Register("linearizable_read", readCheck(server, false))
-	reg.InstallHttpEndpoints(lg, mux)
+	// check if local is learner
+	reg.Register("non_learner", learnerCheck(server))
+	reg.InstallHTTPEndpoints(lg, mux)
 }
 
 func (reg *CheckRegistry) Register(name string, check HealthCheck) {
@@ -263,14 +268,23 @@ func (reg *CheckRegistry) RootPath() string {
 	return "/" + reg.checkType
 }
 
+// InstallHttpEndpoints installs the http handlers for the health checks.
+//
+// Deprecated: Please use (*CheckRegistry) InstallHTTPEndpoints instead.
+//
+//revive:disable-next-line:var-naming
 func (reg *CheckRegistry) InstallHttpEndpoints(lg *zap.Logger, mux *http.ServeMux) {
+	reg.InstallHTTPEndpoints(lg, mux)
+}
+
+func (reg *CheckRegistry) InstallHTTPEndpoints(lg *zap.Logger, mux *http.ServeMux) {
 	checkNames := make([]string, 0, len(reg.checks))
 	for k := range reg.checks {
 		checkNames = append(checkNames, k)
 	}
 
 	// installs the http handler for the root path.
-	reg.installRootHttpEndpoint(lg, mux, checkNames...)
+	reg.installRootHTTPEndpoint(lg, mux, checkNames...)
 	for _, checkName := range checkNames {
 		// installs the http handler for the individual check sub path.
 		subpath := path.Join(reg.RootPath(), checkName)
@@ -302,8 +316,8 @@ func (reg *CheckRegistry) runHealthChecks(ctx context.Context, checkNames ...str
 	return h
 }
 
-// installRootHttpEndpoint installs the http handler for the root path.
-func (reg *CheckRegistry) installRootHttpEndpoint(lg *zap.Logger, mux *http.ServeMux, checks ...string) {
+// installRootHTTPEndpoint installs the http handler for the root path.
+func (reg *CheckRegistry) installRootHTTPEndpoint(lg *zap.Logger, mux *http.ServeMux, checks ...string) {
 	hfunc := func(r *http.Request) HealthStatus {
 		// extracts the health check names to be excludeList from the query param
 		excluded := getQuerySet(r, "exclude")
@@ -420,5 +434,14 @@ func readCheck(srv ServerHealth, serializable bool) func(ctx context.Context) er
 		ctx = srv.AuthStore().WithRoot(ctx)
 		_, err := srv.Range(ctx, &pb.RangeRequest{KeysOnly: true, Limit: 1, Serializable: serializable})
 		return err
+	}
+}
+
+func learnerCheck(srv ServerHealth) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		if srv.IsLearner() {
+			return fmt.Errorf("not supported for learner")
+		}
+		return nil
 	}
 }

@@ -16,11 +16,14 @@ package common
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/require"
 
+	"go.etcd.io/etcd/api/v3/version"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	intf "go.etcd.io/etcd/tests/v3/framework/interfaces"
@@ -71,9 +74,16 @@ func TestDowngradeWithUserAuth(t *testing.T) {
 	testDowngradeWithAuth(t, false, true, WithAuth("user0", "user0Pass"))
 }
 
-func testDowngradeWithAuth(t *testing.T, _expectConnectionError, _expectOperationError bool, _opts ...config.ClientOption) {
-	// TODO(ahrtr): finish this after we added interface methods `Downgrade` into `Client`
-	t.Skip()
+func testDowngradeWithAuth(t *testing.T, expectConnectionError, expectOperationError bool, opts ...config.ClientOption) {
+	currentVersion, err := semver.StrictNewVersion(version.Version)
+	require.NoError(t, err)
+	// downgrade validate only accepts a target of exactly one minor version below the current one
+	targetVersion := semver.New(currentVersion.Major(), currentVersion.Minor()-1, 0, "", "")
+
+	testMaintenanceOperationWithAuth(t, expectConnectionError, expectOperationError, func(ctx context.Context, cc intf.Client) error {
+		_, err := cc.Downgrade(ctx, clientv3.DowngradeValidate, targetVersion.String())
+		return err
+	}, opts...)
 }
 
 /*
@@ -145,9 +155,10 @@ func TestSnapshotWithUserAuth(t *testing.T) {
 	testSnapshotWithAuth(t, false, true, WithAuth("user0", "user0Pass"))
 }
 
-func testSnapshotWithAuth(t *testing.T, _expectConnectionError, _expectOperationError bool, _opts ...config.ClientOption) {
-	// TODO(ahrtr): finish this after we added interface methods `Snapshot` into `Client`
-	t.Skip()
+func testSnapshotWithAuth(t *testing.T, expectConnectionError, expectOperationError bool, opts ...config.ClientOption) {
+	testMaintenanceOperationWithAuth(t, expectConnectionError, expectOperationError, func(ctx context.Context, cc intf.Client) error {
+		return cc.Snapshot(ctx, filepath.Join(t.TempDir(), "snapshot.db"))
+	}, opts...)
 }
 
 /*
@@ -166,7 +177,7 @@ func TestStatusWithRootAuth(t *testing.T) {
 }
 
 func TestStatusWithUserAuth(t *testing.T) {
-	testStatusWithAuth(t, false, true, WithAuth("user0", "user0Pass"))
+	testStatusWithAuth(t, false, false, WithAuth("user0", "user0Pass"))
 }
 
 func testStatusWithAuth(t *testing.T, expectConnectionError, expectOperationError bool, opts ...config.ClientOption) {
@@ -203,7 +214,7 @@ func setupAuthForMaintenanceTest(c intf.Client) error {
 
 func testMaintenanceOperationWithAuth(t *testing.T, expectConnectError, expectOperationError bool, f func(context.Context, intf.Client) error, opts ...config.ClientOption) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	clus := testRunner.NewCluster(ctx, t)
@@ -215,14 +226,12 @@ func testMaintenanceOperationWithAuth(t *testing.T, expectConnectError, expectOp
 
 	ccWithAuth, err := clus.Client(opts...)
 	if expectConnectError {
-		if err == nil {
-			t.Fatalf("%s: expected connection error, but got successful response", t.Name())
-		}
+		require.Errorf(t, err, "%s: expected connection error, but got successful response", t.Name())
 		t.Logf("%s: connection error: %v", t.Name(), err)
 		return
 	}
 	if err != nil {
-		t.Fatalf("%s: unexpected connection error (%v)", t.Name(), err)
+		require.NoErrorf(t, err, "%s: unexpected connection error", t.Name())
 		return
 	}
 
@@ -233,15 +242,11 @@ func testMaintenanceOperationWithAuth(t *testing.T, expectConnectError, expectOp
 		err := f(ctx, ccWithAuth)
 
 		if expectOperationError {
-			if err == nil {
-				t.Fatalf("%s: expected error, but got successful response", t.Name())
-			}
+			require.Errorf(t, err, "%s: expected error, but got successful response", t.Name())
 			t.Logf("%s: operation error: %v", t.Name(), err)
 			return
 		}
 
-		if err != nil {
-			t.Fatalf("%s: unexpected operation error (%v)", t.Name(), err)
-		}
+		require.NoErrorf(t, err, "%s: unexpected operation error", t.Name())
 	})
 }

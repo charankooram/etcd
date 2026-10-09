@@ -17,11 +17,12 @@ package integration
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"google.golang.org/grpc"
+	"github.com/stretchr/testify/require"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
@@ -31,7 +32,7 @@ func TestTLSClientCipherSuitesValid(t *testing.T)    { testTLSCipherSuites(t, tr
 func TestTLSClientCipherSuitesMismatch(t *testing.T) { testTLSCipherSuites(t, false) }
 
 // testTLSCipherSuites ensures mismatching client-side cipher suite
-// fail TLS handshake with the server.
+// fail the range request to the server.
 func testTLSCipherSuites(t *testing.T, valid bool) {
 	integration.BeforeTest(t)
 
@@ -60,23 +61,26 @@ func testTLSCipherSuites(t *testing.T, valid bool) {
 	defer clus.Terminate(t)
 
 	cc, err := cliTLS.ClientConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	cli, cerr := integration.NewClient(t, clientv3.Config{
-		Endpoints:   []string{clus.Members[0].GRPCURL()},
+		Endpoints:   []string{clus.Members[0].GRPCURL},
 		DialTimeout: time.Second,
-		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 		TLS:         cc,
 	})
-	if cli != nil {
-		cli.Close()
-	}
-	if !valid && cerr != context.DeadlineExceeded {
-		t.Fatalf("expected %v with TLS handshake failure, got %v", context.DeadlineExceeded, cerr)
-	}
-	if valid && cerr != nil {
-		t.Fatalf("expected TLS handshake success, got %v", cerr)
+	require.NoError(t, cerr)
+	defer func() {
+		require.NoError(t, cli.Close())
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	_, rerr := cli.Get(ctx, "foo")
+	cancel()
+	if valid {
+		require.NoError(t, rerr)
+	} else {
+		if !errors.Is(rerr, context.DeadlineExceeded) {
+			t.Fatalf("expected %v with TLS handshake failure, got %v", context.DeadlineExceeded, rerr)
+		}
 	}
 }
 
@@ -122,19 +126,18 @@ func TestTLSMinMaxVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cc, err := integration.TestTLSInfo.ClientConfig()
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			cc.MinVersion = tt.minVersion
 			cc.MaxVersion = tt.maxVersion
 			cli, cerr := integration.NewClient(t, clientv3.Config{
-				Endpoints:   []string{clus.Members[0].GRPCURL()},
+				Endpoints:   []string{clus.Members[0].GRPCURL},
 				DialTimeout: time.Second,
-				DialOptions: []grpc.DialOption{grpc.WithBlock()},
 				TLS:         cc,
 			})
 			if cerr != nil {
-				assert.True(t, tt.expectError, "got TLS handshake error while expecting success: %v", cerr)
-				assert.Equal(t, context.DeadlineExceeded, cerr, "expected %v with TLS handshake failure, got %v", context.DeadlineExceeded, cerr)
+				assert.Truef(t, tt.expectError, "got TLS handshake error while expecting success: %v", cerr)
+				assert.ErrorIs(t, cerr, context.DeadlineExceeded)
 				return
 			}
 

@@ -15,7 +15,7 @@
 package model
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"testing"
 
@@ -32,7 +32,7 @@ func TestModelNonDeterministic(t *testing.T) {
 			operations: []testOperation{
 				{req: putRequest("key1", "1"), resp: failedResponse(errors.New("failed"))},
 				{req: putRequest("key2", "2"), resp: putResponse(3)},
-				{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2}, {Key: []byte("key2"), Value: []byte("2"), ModRevision: 3}}, 2, 3)},
+				{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key1"), Value: []byte("1"), ModRevision: 2, Version: 1}, {Key: []byte("key2"), Value: []byte("2"), ModRevision: 3, Version: 1}}, 2, 3)},
 			},
 		},
 		{
@@ -40,7 +40,7 @@ func TestModelNonDeterministic(t *testing.T) {
 			operations: []testOperation{
 				{req: putRequest("key1", "1"), resp: failedResponse(errors.New("failed"))},
 				{req: putRequest("key2", "2"), resp: putResponse(2)},
-				{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key2"), Value: []byte("2"), ModRevision: 2}}, 1, 2)},
+				{req: listRequest("key", 0), resp: rangeResponse([]*mvccpb.KeyValue{{Key: []byte("key2"), Value: []byte("2"), ModRevision: 2, Version: 1}}, 1, 2)},
 			},
 		},
 		{
@@ -89,14 +89,14 @@ func TestModelNonDeterministic(t *testing.T) {
 				// One failed request, one persisted.
 				{req: putRequest("key", "1"), resp: putResponse(2)},
 				{req: putRequest("key", "2"), resp: failedResponse(errors.New("failed"))},
-				{req: getRequest("key"), resp: getResponse("key", "3", 3, 3), expectFailure: true},
-				{req: getRequest("key"), resp: getResponse("key", "3", 2, 3), expectFailure: true},
-				{req: getRequest("key"), resp: getResponse("key", "2", 2, 2), expectFailure: true},
-				{req: getRequest("key"), resp: getResponse("key", "2", 3, 3)},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "3", 3, 2, 3), expectFailure: true},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "3", 2, 2, 3), expectFailure: true},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "2", 2, 2, 2), expectFailure: true},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "2", 3, 2, 3)},
 				// Two failed request, two persisted.
 				{req: putRequest("key", "3"), resp: failedResponse(errors.New("failed"))},
 				{req: putRequest("key", "4"), resp: failedResponse(errors.New("failed"))},
-				{req: getRequest("key"), resp: getResponse("key", "4", 5, 5)},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "4", 5, 4, 5)},
 			},
 		},
 		{
@@ -132,7 +132,7 @@ func TestModelNonDeterministic(t *testing.T) {
 				{req: putRequest("key", "4"), resp: putResponse(4)},
 				{req: compareRevisionAndPutRequest("key", 5, ""), resp: compareRevisionAndPutResponse(false, 4)},
 				{req: putRequest("key", "5"), resp: failedResponse(errors.New("failed"))},
-				{req: getRequest("key"), resp: getResponse("key", "5", 5, 5)},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "5", 5, 4, 5)},
 			},
 		},
 		{
@@ -248,13 +248,13 @@ func TestModelNonDeterministic(t *testing.T) {
 				// One failed request, one persisted.
 				{req: putRequest("key", "1"), resp: putResponse(2)},
 				{req: compareRevisionAndPutRequest("key", 2, "2"), resp: failedResponse(errors.New("failed"))},
-				{req: getRequest("key"), resp: getResponse("key", "2", 2, 2), expectFailure: true},
-				{req: getRequest("key"), resp: getResponse("key", "2", 3, 3)},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "2", 2, 2, 2), expectFailure: true},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "2", 3, 2, 3)},
 				// Two failed request, two persisted.
 				{req: putRequest("key", "3"), resp: putResponse(4)},
 				{req: compareRevisionAndPutRequest("key", 4, "4"), resp: failedResponse(errors.New("failed"))},
 				{req: compareRevisionAndPutRequest("key", 5, "5"), resp: failedResponse(errors.New("failed"))},
-				{req: getRequest("key"), resp: getResponse("key", "5", 6, 6)},
+				{req: getRequest("key"), resp: getResponseWithVer("key", "5", 6, 5, 6)},
 			},
 		},
 		{
@@ -327,17 +327,15 @@ func TestModelNonDeterministic(t *testing.T) {
 	for _, tc := range nonDeterministicTestScenarios {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			state := NonDeterministicModel.Init()
+			keys := keysFromTestOperations(tc.operations)
+			model := NonDeterministicModel(keys)
+			state := model.Init()
 			for _, op := range tc.operations {
-				ok, newState := NonDeterministicModel.Step(state, op.req, op.resp)
+				ok, newState := model.StepContext(context.Background(), state, op.req, op.resp)
 				if ok != !op.expectFailure {
 					t.Logf("state: %v", state)
-					t.Errorf("Unexpected operation result, expect: %v, got: %v, operation: %s", !op.expectFailure, ok, NonDeterministicModel.DescribeOperation(op.req, op.resp))
-					var loadedState nonDeterministicState
-					err := json.Unmarshal([]byte(state.(string)), &loadedState)
-					if err != nil {
-						t.Fatalf("Failed to load state: %v", err)
-					}
+					t.Errorf("Unexpected operation result, expect: %v, got: %v, operation: %s", !op.expectFailure, ok, model.DescribeOperation(op.req, op.resp))
+					loadedState := state.(nonDeterministicState)
 					for i, s := range loadedState {
 						_, resp := s.Step(op.req)
 						t.Errorf("For state %d, response diff: %s", i, cmp.Diff(op.resp, resp))
@@ -391,7 +389,7 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       getResponse("key", "a", 1, 1),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(2),
 			expectMatch: false,
 		},
 		{
@@ -416,8 +414,13 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       putResponse(3),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(1),
 			expectMatch: false,
+		},
+		{
+			resp1:       putResponse(3),
+			resp2:       partialResponse(0),
+			expectMatch: true,
 		},
 		{
 			resp1:       deleteResponse(1, 5),
@@ -446,13 +449,18 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       deleteResponse(0, 5),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(4),
 			expectMatch: false,
+		},
+		{
+			resp1:       deleteResponse(0, 5),
+			resp2:       partialResponse(0),
+			expectMatch: true,
 		},
 		{
 			resp1:       deleteResponse(1, 5),
 			resp2:       partialResponse(0),
-			expectMatch: false,
+			expectMatch: true,
 		},
 		{
 			resp1:       deleteResponse(0, 5),
@@ -491,16 +499,81 @@ func TestModelResponseMatch(t *testing.T) {
 		},
 		{
 			resp1:       compareRevisionAndPutResponse(true, 7),
-			resp2:       partialResponse(0),
+			resp2:       partialResponse(4),
+			expectMatch: false,
+		},
+		{
+			resp1:       compareRevisionAndPutResponse(false, 7),
+			resp2:       partialResponse(3),
 			expectMatch: false,
 		},
 		{
 			resp1:       compareRevisionAndPutResponse(false, 7),
 			resp2:       partialResponse(0),
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{EtcdResponse: EtcdResponse{Revision: 1, Txn: &TxnResponse{Failure: false, Results: []EtcdOperationResult{{Deleted: 1}}}}},
+			resp2:       failedResponse(errors.New("failed request")),
+			expectMatch: false,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request 1")),
+			resp2:       failedResponse(errors.New("failed request 2")),
+			expectMatch: false,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request")),
+			resp2:       failedResponse(errors.New("failed request")),
+			expectMatch: true,
+		},
+		{
+			resp1:       putResponse(2),
+			resp2:       MaybeEtcdResponse{Persisted: true},
+			expectMatch: true,
+		},
+		{
+			resp1:       putResponse(2),
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       putResponse(2),
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 3},
+			expectMatch: false,
+		},
+		{
+			resp1:       putResponseWithMemberID(2, 1),
+			resp2:       putResponseWithMemberID(2, 2),
+			expectMatch: true,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request")),
+			resp2:       MaybeEtcdResponse{Persisted: true},
+			expectMatch: true,
+		},
+		{
+			resp1:       failedResponse(errors.New("failed request")),
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{Persisted: true},
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
+			expectMatch: true,
+		},
+		{
+			resp1:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 1},
+			resp2:       MaybeEtcdResponse{Persisted: true, PersistedRevision: 2},
 			expectMatch: false,
 		},
 	}
 	for i, tc := range tcs {
-		assert.Equal(t, tc.expectMatch, Match(tc.resp1, tc.resp2), "%d %+v %+v", i, tc.resp1, tc.resp2)
+		assert.Equalf(t, tc.expectMatch, Match(tc.resp1, tc.resp2), "%d %+v %+v", i, tc.resp1, tc.resp2)
 	}
 }

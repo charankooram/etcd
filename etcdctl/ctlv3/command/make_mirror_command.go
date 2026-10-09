@@ -53,9 +53,10 @@ var (
 // NewMakeMirrorCommand returns the cobra command for "makeMirror".
 func NewMakeMirrorCommand() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "make-mirror [options] <destination>",
-		Short: "Makes a mirror at the destination etcd cluster",
-		Run:   makeMirrorCommandFunc,
+		Use:     "make-mirror [options] <destination>",
+		Short:   "Makes a mirror at the destination etcd cluster",
+		Run:     makeMirrorCommandFunc,
+		GroupID: groupUtilityID,
 	}
 
 	c.Flags().StringVar(&mmprefix, "prefix", "", "Key-value prefix to mirror")
@@ -110,6 +111,8 @@ func makeMirrorCommandFunc(cmd *cobra.Command, args []string) {
 	dialTimeout := dialTimeoutFromCmd(cmd)
 	keepAliveTime := keepAliveTimeFromCmd(cmd)
 	keepAliveTimeout := keepAliveTimeoutFromCmd(cmd)
+	maxCallSendMsgSize := maxCallSendMsgSizeFromCmd(cmd)
+	maxCallRecvMsgSize := maxCallRecvMsgSizeFromCmd(cmd)
 	sec := &clientv3.SecureConfig{
 		Cert:              mmcert,
 		Key:               mmkey,
@@ -120,12 +123,14 @@ func makeMirrorCommandFunc(cmd *cobra.Command, args []string) {
 	auth := authDestCfg()
 
 	cc := &clientv3.ConfigSpec{
-		Endpoints:        []string{args[0]},
-		DialTimeout:      dialTimeout,
-		KeepAliveTime:    keepAliveTime,
-		KeepAliveTimeout: keepAliveTimeout,
-		Secure:           sec,
-		Auth:             auth,
+		Endpoints:          []string{args[0]},
+		DialTimeout:        dialTimeout,
+		KeepAliveTime:      keepAliveTime,
+		KeepAliveTimeout:   keepAliveTimeout,
+		MaxCallSendMsgSize: maxCallSendMsgSize,
+		MaxCallRecvMsgSize: maxCallRecvMsgSize,
+		Secure:             sec,
+		Auth:               auth,
 	}
 	dc := mustClient(cc)
 	c := mustClientFromCmd(cmd)
@@ -212,10 +217,10 @@ func makeMirror(ctx context.Context, c *clientv3.Client, dc *clientv3.Client) er
 			}
 
 			switch ev.Type {
-			case mvccpb.PUT:
+			case mvccpb.Event_PUT:
 				ops = append(ops, clientv3.OpPut(modifyPrefix(string(ev.Kv.Key)), string(ev.Kv.Value)))
 				atomic.AddInt64(&total, 1)
-			case mvccpb.DELETE:
+			case mvccpb.Event_DELETE:
 				ops = append(ops, clientv3.OpDelete(modifyPrefix(string(ev.Kv.Key))))
 				atomic.AddInt64(&total, 1)
 			default:

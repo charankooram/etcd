@@ -15,6 +15,7 @@
 package etcdmain
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -23,10 +24,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/featuregate"
 	"go.etcd.io/etcd/pkg/v3/flags"
 	"go.etcd.io/etcd/server/v3/embed"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
+	"go.etcd.io/etcd/server/v3/features"
 )
 
 func TestConfigParsingMemberFlags(t *testing.T) {
@@ -34,9 +40,8 @@ func TestConfigParsingMemberFlags(t *testing.T) {
 		"-data-dir=testdir",
 		"-name=testname",
 		"-max-wals=10",
-		"-max-snapshots=10",
 		"-snapshot-count=10",
-		"-experimental-snapshot-catchup-entries=1000",
+		"-snapshot-catchup-entries=1000",
 		"-listen-peer-urls=http://localhost:8000,https://localhost:8001",
 		"-listen-client-urls=http://localhost:7000,https://localhost:7001",
 		"-listen-client-http-urls=http://localhost:7002,https://localhost:7003",
@@ -56,18 +61,16 @@ func TestConfigParsingMemberFlags(t *testing.T) {
 func TestConfigFileMemberFields(t *testing.T) {
 	yc := struct {
 		Dir                    string `json:"data-dir"`
-		MaxSnapFiles           uint   `json:"max-snapshots"`
-		MaxWalFiles            uint   `json:"max-wals"`
+		MaxWALFiles            uint   `json:"max-wals"`
 		Name                   string `json:"name"`
 		SnapshotCount          uint64 `json:"snapshot-count"`
-		SnapshotCatchUpEntries uint64 `json:"experimental-snapshot-catch-up-entries"`
-		ListenPeerUrls         string `json:"listen-peer-urls"`
-		ListenClientUrls       string `json:"listen-client-urls"`
-		ListenClientHttpUrls   string `json:"listen-client-http-urls"`
-		AdvertiseClientUrls    string `json:"advertise-client-urls"`
+		SnapshotCatchUpEntries uint64 `json:"snapshot-catchup-entries"`
+		ListenPeerURLs         string `json:"listen-peer-urls"`
+		ListenClientURLs       string `json:"listen-client-urls"`
+		ListenClientHTTPURLs   string `json:"listen-client-http-urls"`
+		AdvertiseClientURLs    string `json:"advertise-client-urls"`
 	}{
 		"testdir",
-		10,
 		10,
 		"testname",
 		10,
@@ -202,27 +205,27 @@ func TestConfigFileClusteringFlags(t *testing.T) {
 func TestConfigParsingConflictClusteringFlags(t *testing.T) {
 	conflictArgs := [][]string{
 		{
-			"-initial-cluster=0=localhost:8000",
-			"-discovery=http://example.com/abc",
+			"--initial-cluster=0=localhost:8000",
+			"--discovery-endpoints=http://example.com/abc",
 		},
 		{
-			"-discovery-srv=example.com",
-			"-discovery=http://example.com/abc",
+			"--discovery-srv=example.com",
+			"--discovery-endpoints=http://example.com/abc",
 		},
 		{
-			"-initial-cluster=0=localhost:8000",
-			"-discovery-srv=example.com",
+			"--initial-cluster=0=localhost:8000",
+			"--discovery-srv=example.com",
 		},
 		{
-			"-initial-cluster=0=localhost:8000",
-			"-discovery=http://example.com/abc",
-			"-discovery-srv=example.com",
+			"--initial-cluster=0=localhost:8000",
+			"--discovery-endpoints=http://example.com/abc",
+			"--discovery-srv=example.com",
 		},
 	}
 
 	for i, tt := range conflictArgs {
 		cfg := newConfig()
-		if err := cfg.parse(tt); err != embed.ErrConflictBootstrapFlags {
+		if err := cfg.parse(tt); !errors.Is(err, embed.ErrConflictBootstrapFlags) {
 			t.Errorf("%d: err = %v, want %v", i, err, embed.ErrConflictBootstrapFlags)
 		}
 	}
@@ -230,17 +233,21 @@ func TestConfigParsingConflictClusteringFlags(t *testing.T) {
 
 func TestConfigFileConflictClusteringFlags(t *testing.T) {
 	tests := []struct {
-		InitialCluster string `json:"initial-cluster"`
-		DNSCluster     string `json:"discovery-srv"`
-		Durl           string `json:"discovery"`
+		InitialCluster string                      `json:"initial-cluster"`
+		DNSCluster     string                      `json:"discovery-srv"`
+		DiscoveryCfg   v3discovery.DiscoveryConfig `json:"discovery-config"`
 	}{
 		{
 			InitialCluster: "0=localhost:8000",
-			Durl:           "http://example.com/abc",
+			DiscoveryCfg: v3discovery.DiscoveryConfig{
+				ConfigSpec: clientv3.ConfigSpec{Endpoints: []string{"http://example.com/abc"}},
+			},
 		},
 		{
 			DNSCluster: "example.com",
-			Durl:       "http://example.com/abc",
+			DiscoveryCfg: v3discovery.DiscoveryConfig{
+				ConfigSpec: clientv3.ConfigSpec{Endpoints: []string{"http://example.com/abc"}},
+			},
 		},
 		{
 			InitialCluster: "0=localhost:8000",
@@ -248,8 +255,10 @@ func TestConfigFileConflictClusteringFlags(t *testing.T) {
 		},
 		{
 			InitialCluster: "0=localhost:8000",
-			Durl:           "http://example.com/abc",
-			DNSCluster:     "example.com",
+			DiscoveryCfg: v3discovery.DiscoveryConfig{
+				ConfigSpec: clientv3.ConfigSpec{Endpoints: []string{"http://example.com/abc"}},
+			},
+			DNSCluster: "example.com",
 		},
 	}
 
@@ -265,7 +274,7 @@ func TestConfigFileConflictClusteringFlags(t *testing.T) {
 		args := []string{fmt.Sprintf("--config-file=%s", tmpfile.Name())}
 
 		cfg := newConfig()
-		if err := cfg.parse(args); err != embed.ErrConflictBootstrapFlags {
+		if err := cfg.parse(args); !errors.Is(err, embed.ErrConflictBootstrapFlags) {
 			t.Errorf("%d: err = %v, want %v", i, err, embed.ErrConflictBootstrapFlags)
 		}
 	}
@@ -278,29 +287,28 @@ func TestConfigParsingMissedAdvertiseClientURLsFlag(t *testing.T) {
 	}{
 		{
 			[]string{
-				"-initial-cluster=infra1=http://127.0.0.1:2380",
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--initial-cluster=infra1=http://127.0.0.1:2380",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
 		{
 			[]string{
-				"-discovery-srv=example.com",
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--discovery-srv=example.com",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
 		{
 			[]string{
-				"-discovery=http://example.com/abc",
-				"-discovery-fallback=exit",
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--discovery-fallback=exit",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
 		{
 			[]string{
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
@@ -308,7 +316,7 @@ func TestConfigParsingMissedAdvertiseClientURLsFlag(t *testing.T) {
 
 	for i, tt := range tests {
 		cfg := newConfig()
-		if err := cfg.parse(tt.args); err != tt.werr {
+		if err := cfg.parse(tt.args); !errors.Is(err, tt.werr) {
 			t.Errorf("%d: err = %v, want %v", i, err, tt.werr)
 		}
 	}
@@ -325,9 +333,8 @@ func TestConfigIsNewCluster(t *testing.T) {
 	for i, tt := range tests {
 		cfg := newConfig()
 		args := []string{"--initial-cluster-state", tests[i].state}
-		if err := cfg.parse(args); err != nil {
-			t.Fatalf("#%d: unexpected clusterState.Set error: %v", i, err)
-		}
+		err := cfg.parse(args)
+		require.NoErrorf(t, err, "#%d: unexpected clusterState.Set error: %v", i, err)
 		if g := cfg.ec.IsNewCluster(); g != tt.wIsNew {
 			t.Errorf("#%d: isNewCluster = %v, want %v", i, g, tt.wIsNew)
 		}
@@ -395,8 +402,53 @@ func TestFlagsPresentInHelp(t *testing.T) {
 	})
 }
 
+func TestParseFeatureGateFlags(t *testing.T) {
+	testCases := []struct {
+		name             string
+		args             []string
+		expectErr        bool
+		expectedFeatures map[featuregate.Feature]bool
+	}{
+		{
+			name: "default",
+			expectedFeatures: map[featuregate.Feature]bool{
+				features.StopGRPCServiceOnDefrag: false,
+			},
+		},
+		{
+			name: "can set feature gate from feature gate flag",
+			args: []string{
+				"--feature-gates=StopGRPCServiceOnDefrag=true,InitialCorruptCheck=true",
+			},
+			expectedFeatures: map[featuregate.Feature]bool{
+				features.StopGRPCServiceOnDefrag: true,
+				features.InitialCorruptCheck:     true,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newConfig()
+			err := cfg.parse(tc.args)
+			if tc.expectErr {
+				require.Errorf(t, err, "expect parse error")
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range tc.expectedFeatures {
+				if cfg.ec.ServerFeatureGate.Enabled(k) != v {
+					t.Errorf("expected feature gate %s=%v, got %v", k, v, cfg.ec.ServerFeatureGate.Enabled(k))
+				}
+			}
+		})
+	}
+}
+
 func mustCreateCfgFile(t *testing.T, b []byte) *os.File {
-	tmpfile, err := os.CreateTemp("", "servercfg")
+	tmpfile, err := os.CreateTemp(t.TempDir(), "servercfg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +471,6 @@ func validateMemberFlags(t *testing.T, cfg *config) {
 		ListenPeerUrls:         []url.URL{{Scheme: "http", Host: "localhost:8000"}, {Scheme: "https", Host: "localhost:8001"}},
 		ListenClientUrls:       []url.URL{{Scheme: "http", Host: "localhost:7000"}, {Scheme: "https", Host: "localhost:7001"}},
 		ListenClientHttpUrls:   []url.URL{{Scheme: "http", Host: "localhost:7002"}, {Scheme: "https", Host: "localhost:7003"}},
-		MaxSnapFiles:           10,
 		MaxWalFiles:            10,
 		Name:                   "testname",
 		SnapshotCount:          10,
@@ -428,9 +479,6 @@ func validateMemberFlags(t *testing.T, cfg *config) {
 
 	if cfg.ec.Dir != wcfg.Dir {
 		t.Errorf("dir = %v, want %v", cfg.ec.Dir, wcfg.Dir)
-	}
-	if cfg.ec.MaxSnapFiles != wcfg.MaxSnapFiles {
-		t.Errorf("maxsnap = %v, want %v", cfg.ec.MaxSnapFiles, wcfg.MaxSnapFiles)
 	}
 	if cfg.ec.MaxWalFiles != wcfg.MaxWalFiles {
 		t.Errorf("maxwal = %v, want %v", cfg.ec.MaxWalFiles, wcfg.MaxWalFiles)

@@ -33,7 +33,14 @@ type Config struct {
 	// 0 disables auto-sync. By default auto-sync is disabled.
 	AutoSyncInterval time.Duration `json:"auto-sync-interval"`
 
-	// DialTimeout is the timeout for failing to establish a connection.
+	// DialTimeout is the timeout used for certain operations, such as fetching
+	// an authentication token and checking the cluster version (when
+	// RejectOldCluster is true). It is also used to derive the initial
+	// keep-alive timeout for lease keep-alives (DialTimeout + 1s).
+	// It is NOT used to bound the gRPC connection establishment itself,
+	// because client creation is non-blocking since
+	// https://github.com/etcd-io/etcd/pull/21832.
+	// A value of 0 means no timeout is applied to those operations.
 	DialTimeout time.Duration `json:"dial-timeout"`
 
 	// DialKeepAliveTime is the time after which client pings the server to see if
@@ -66,12 +73,15 @@ type Config struct {
 	// Password is a password for authentication.
 	Password string `json:"password"`
 
+	// Token is a JWT used for authentication instead of a password.
+	Token string `json:"token"`
+
 	// RejectOldCluster when set will refuse to create a client against an outdated cluster.
 	RejectOldCluster bool `json:"reject-old-cluster"`
 
 	// DialOptions is a list of dial options for the grpc client (e.g., for interceptors).
-	// For example, pass "grpc.WithBlock()" to block until the underlying connection is up.
-	// Without this, Dial returns immediately and connecting the server happens in background.
+	// Note that grpc.NewClient ignores options that are specific to grpc.Dial such as
+	// "grpc.WithBlock()".
 	DialOptions []grpc.DialOption
 
 	// Context is the default client context; it can be used to cancel grpc dial out and
@@ -106,13 +116,15 @@ type Config struct {
 // environment variables or config file. It is a fully declarative configuration,
 // and can be serialized & deserialized to/from JSON.
 type ConfigSpec struct {
-	Endpoints        []string      `json:"endpoints"`
-	RequestTimeout   time.Duration `json:"request-timeout"`
-	DialTimeout      time.Duration `json:"dial-timeout"`
-	KeepAliveTime    time.Duration `json:"keepalive-time"`
-	KeepAliveTimeout time.Duration `json:"keepalive-timeout"`
-	Secure           *SecureConfig `json:"secure"`
-	Auth             *AuthConfig   `json:"auth"`
+	Endpoints          []string      `json:"endpoints"`
+	RequestTimeout     time.Duration `json:"request-timeout"`
+	DialTimeout        time.Duration `json:"dial-timeout"`
+	KeepAliveTime      time.Duration `json:"keepalive-time"`
+	KeepAliveTimeout   time.Duration `json:"keepalive-timeout"`
+	MaxCallSendMsgSize int           `json:"max-request-bytes"`
+	MaxCallRecvMsgSize int           `json:"max-recv-bytes"`
+	Secure             *SecureConfig `json:"secure"`
+	Auth               *AuthConfig   `json:"auth"`
 }
 
 type SecureConfig struct {
@@ -128,10 +140,35 @@ type SecureConfig struct {
 type AuthConfig struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Token    string `json:"token"`
+}
+
+func (cs *ConfigSpec) Clone() *ConfigSpec {
+	if cs == nil {
+		return nil
+	}
+
+	clone := *cs
+
+	if len(cs.Endpoints) > 0 {
+		clone.Endpoints = make([]string, len(cs.Endpoints))
+		copy(clone.Endpoints, cs.Endpoints)
+	}
+
+	if cs.Secure != nil {
+		clone.Secure = &SecureConfig{}
+		*clone.Secure = *cs.Secure
+	}
+	if cs.Auth != nil {
+		clone.Auth = &AuthConfig{}
+		*clone.Auth = *cs.Auth
+	}
+
+	return &clone
 }
 
 func (cfg AuthConfig) Empty() bool {
-	return cfg.Username == "" && cfg.Password == ""
+	return cfg.Username == "" && cfg.Password == "" && cfg.Token == ""
 }
 
 // NewClientConfig creates a Config based on the provided ConfigSpec.
@@ -146,12 +183,15 @@ func NewClientConfig(confSpec *ConfigSpec, lg *zap.Logger) (*Config, error) {
 		DialTimeout:          confSpec.DialTimeout,
 		DialKeepAliveTime:    confSpec.KeepAliveTime,
 		DialKeepAliveTimeout: confSpec.KeepAliveTimeout,
+		MaxCallSendMsgSize:   confSpec.MaxCallSendMsgSize,
+		MaxCallRecvMsgSize:   confSpec.MaxCallRecvMsgSize,
 		TLS:                  tlsCfg,
 	}
 
 	if confSpec.Auth != nil {
 		cfg.Username = confSpec.Auth.Username
 		cfg.Password = confSpec.Auth.Password
+		cfg.Token = confSpec.Auth.Token
 	}
 
 	return cfg, nil

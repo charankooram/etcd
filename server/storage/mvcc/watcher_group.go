@@ -22,23 +22,21 @@ import (
 	"go.etcd.io/etcd/pkg/v3/adt"
 )
 
-var (
-	// watchBatchMaxRevs is the maximum distinct revisions that
-	// may be sent to an unsynced watcher at a time. Declared as
-	// var instead of const for testing purposes.
-	watchBatchMaxRevs = 1000
-)
+// watchBatchMaxRevs is the maximum distinct revisions that
+// may be sent to an unsynced watcher at a time. Declared as
+// var instead of const for testing purposes.
+var watchBatchMaxRevs = 1000
 
 type eventBatch struct {
 	// evs is a batch of revision-ordered events
-	evs []mvccpb.Event
+	evs []*mvccpb.Event
 	// revs is the minimum unique revisions observed for this batch
 	revs int
 	// moreRev is first revision with more events following this batch
 	moreRev int64
 }
 
-func (eb *eventBatch) add(ev mvccpb.Event) {
+func (eb *eventBatch) add(ev *mvccpb.Event) {
 	if eb.revs > watchBatchMaxRevs {
 		// maxed out batch size
 		return
@@ -67,7 +65,7 @@ func (eb *eventBatch) add(ev mvccpb.Event) {
 
 type watcherBatch map[*watcher]*eventBatch
 
-func (wb watcherBatch) add(w *watcher, ev mvccpb.Event) {
+func (wb watcherBatch) add(w *watcher, ev *mvccpb.Event) {
 	eb := wb[w]
 	if eb == nil {
 		eb = &eventBatch{}
@@ -78,7 +76,7 @@ func (wb watcherBatch) add(w *watcher, ev mvccpb.Event) {
 
 // newWatcherBatch maps watchers to their matched events. It enables quick
 // events look up by watcher.
-func newWatcherBatch(wg *watcherGroup, evs []mvccpb.Event) watcherBatch {
+func newWatcherBatch(wg *watcherGroup, evs []*mvccpb.Event) watcherBatch {
 	if len(wg.watchers) == 0 {
 		return nil
 	}
@@ -88,7 +86,11 @@ func newWatcherBatch(wg *watcherGroup, evs []mvccpb.Event) watcherBatch {
 		for w := range wg.watcherSetByKey(string(ev.Kv.Key)) {
 			if ev.Kv.ModRevision >= w.minRev {
 				// don't double notify
-				wb.add(w, ev)
+				wb.add(w, &mvccpb.Event{
+					Type:   ev.Type,
+					Kv:     ev.Kv,
+					PrevKv: ev.PrevKv,
+				})
 			}
 		}
 	}

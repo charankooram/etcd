@@ -16,10 +16,13 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"sync"
+
+	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/pkg/v3/crc"
@@ -89,7 +92,7 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 
 	fileBufReader := d.brs[0]
 	l, err := readInt64(fileBufReader)
-	if err == io.EOF || (err == nil && l == 0) {
+	if errors.Is(err, io.EOF) || (err == nil && l == 0) {
 		// hit end of file or preallocated space
 		d.brs = d.brs[1:]
 		if len(d.brs) == 0 {
@@ -114,12 +117,12 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 	if _, err = io.ReadFull(fileBufReader, data); err != nil {
 		// ReadFull returns io.EOF only if no bytes were read
 		// the decoder should treat this as an ErrUnexpectedEOF instead.
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
 		return err
 	}
-	if err := rec.Unmarshal(data[:recBytes]); err != nil {
+	if err := proto.Unmarshal(data[:recBytes], rec); err != nil {
 		if d.isTornEntry(data) {
 			return io.ErrUnexpectedEOF
 		}
@@ -127,7 +130,7 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 	}
 
 	// skip crc checking if the record type is CrcType
-	if rec.Type != CrcType {
+	if rec.GetType() != CrcType {
 		_, err := d.crc.Write(rec.Data)
 		if err != nil {
 			return err
@@ -209,16 +212,16 @@ func (d *decoder) LastCRC() uint32 {
 
 func (d *decoder) LastOffset() int64 { return d.lastValidOff }
 
-func MustUnmarshalEntry(d []byte) raftpb.Entry {
+func MustUnmarshalEntry(d []byte) *raftpb.Entry {
 	var e raftpb.Entry
-	pbutil.MustUnmarshal(&e, d)
-	return e
+	pbutil.MustUnmarshalMessage(&e, d)
+	return &e
 }
 
-func MustUnmarshalState(d []byte) raftpb.HardState {
+func MustUnmarshalState(d []byte) *raftpb.HardState {
 	var s raftpb.HardState
-	pbutil.MustUnmarshal(&s, d)
-	return s
+	pbutil.MustUnmarshalMessage(&s, d)
+	return &s
 }
 
 func readInt64(r io.Reader) (int64, error) {

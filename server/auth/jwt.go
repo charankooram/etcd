@@ -22,7 +22,7 @@ import (
 	"errors"
 	"time"
 
-	jwt "github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 )
 
@@ -61,7 +61,6 @@ func (t *tokenJWT) info(ctx context.Context, token string, rev uint64) (*AuthInf
 			return t.key, nil
 		}
 	})
-
 	if err != nil {
 		t.lg.Warn(
 			"failed to parse a JWT token",
@@ -116,13 +115,13 @@ func (t *tokenJWT) assign(ctx context.Context, username string, revision uint64)
 		return "", err
 	}
 
-	t.lg.Debug(
-		"created/assigned a new JWT token",
-		zap.String("user-name", username),
-		zap.Uint64("revision", revision),
-		zap.String("token", token),
-	)
-	return token, err
+	if ce := t.lg.Check(zap.DebugLevel, "created/assigned a new JWT token"); ce != nil {
+		tokenFingerprint := redactToken(token)
+		ce.Write(zap.String("user-name", username),
+			zap.Uint64("revision", revision),
+			zap.String("token-fingerprint", tokenFingerprint))
+	}
+	return token, nil
 }
 
 func newTokenProviderJWT(lg *zap.Logger, optMap map[string]string) (*tokenJWT, error) {
@@ -137,7 +136,7 @@ func newTokenProviderJWT(lg *zap.Logger, optMap map[string]string) (*tokenJWT, e
 		return nil, ErrInvalidAuthOpts
 	}
 
-	var keys = make([]string, 0, len(optMap))
+	keys := make([]string, 0, len(optMap))
 	for k := range optMap {
 		if !knownOptions[k] {
 			keys = append(keys, k)

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	bolt "go.etcd.io/bbolt"
@@ -35,8 +36,6 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	serverstorage "go.etcd.io/etcd/server/v3/storage"
 	"go.etcd.io/etcd/server/v3/storage/datadir"
 	"go.etcd.io/etcd/server/v3/storage/schema"
@@ -90,22 +89,20 @@ func TestBootstrapExistingClusterNoWALMaxLearner(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cluster, err := types.NewURLsMap("node0=http://localhost:2380,node1=http://localhost:2381,node2=http://localhost:2382")
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			require.NoErrorf(t, err, "unexpected error: %v", err)
 			cfg := config.ServerConfig{
-				Name:                    "node0",
-				InitialPeerURLsMap:      cluster,
-				Logger:                  zaptest.NewLogger(t),
-				ExperimentalMaxLearners: tt.maxLearner,
+				Name:               "node0",
+				InitialPeerURLsMap: cluster,
+				Logger:             zaptest.NewLogger(t),
+				MaxLearners:        tt.maxLearner,
 			}
 			_, err = bootstrapExistingClusterNoWAL(cfg, mockBootstrapRoundTrip(tt.members))
 			hasError := err != nil
 			if hasError != tt.hasError {
 				t.Errorf("expected error: %v got: %v", tt.hasError, err)
 			}
-			if hasError && !strings.Contains(err.Error(), tt.expectedError.Error()) {
-				t.Fatalf("expected error to contain: %q, got: %q", tt.expectedError.Error(), err.Error())
+			if hasError {
+				require.Containsf(t, err.Error(), tt.expectedError.Error(), "expected error to contain: %q, got: %q", tt.expectedError.Error(), err.Error())
 			}
 		})
 	}
@@ -134,7 +131,7 @@ func mockBootstrapRoundTrip(members []etcdserverpb.Member) roundTripFunc {
 		case strings.Contains(r.URL.String(), DowngradeEnabledPath):
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`true`)),
+				Body:       io.NopCloser(strings.NewReader(`false`)),
 			}, nil
 		}
 		return nil, nil
@@ -177,9 +174,7 @@ func TestBootstrapBackend(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dataDir, err := createDataDir(t)
-			if err != nil {
-				t.Fatalf("Failed to create the data dir, unexpected error: %v", err)
-			}
+			require.NoErrorf(t, err, "Failed to create the data dir, unexpected error: %v", err)
 
 			cfg := config.ServerConfig{
 				Name:                "demoNode",
@@ -189,15 +184,12 @@ func TestBootstrapBackend(t *testing.T) {
 			}
 
 			if tt.prepareData != nil {
-				if err = tt.prepareData(cfg); err != nil {
-					t.Fatalf("failed to prepare data, unexpected error: %v", err)
-				}
+				err = tt.prepareData(cfg)
+				require.NoErrorf(t, err, "failed to prepare data, unexpected error: %v", err)
 			}
 
 			haveWAL := wal.Exist(cfg.WALDir())
-			st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
-			ss := snap.New(cfg.Logger, cfg.SnapDir())
-			backend, err := bootstrapBackend(cfg, haveWAL, st, ss)
+			backend, err := bootstrapBackend(cfg, haveWAL)
 			defer t.Cleanup(func() {
 				backend.Close()
 			})
@@ -207,8 +199,8 @@ func TestBootstrapBackend(t *testing.T) {
 			if hasError != expectedHasError {
 				t.Errorf("expected error: %v got: %v", expectedHasError, err)
 			}
-			if hasError && !strings.Contains(err.Error(), tt.expectedError.Error()) {
-				t.Fatalf("expected error to contain: %q, got: %q", tt.expectedError.Error(), err.Error())
+			if hasError {
+				require.Containsf(t, err.Error(), tt.expectedError.Error(), "expected error to contain: %q, got: %q", tt.expectedError.Error(), err.Error())
 			}
 
 			if backend.ci.ConsistentIndex() != tt.expectedConsistentIdx {
@@ -225,12 +217,12 @@ func createDataDir(t *testing.T) (string, error) {
 	dataDir := t.TempDir()
 
 	// create ${dataDir}/member/snap
-	if err = os.MkdirAll(datadir.ToSnapDir(dataDir), 0700); err != nil {
+	if err = os.MkdirAll(datadir.ToSnapDir(dataDir), 0o700); err != nil {
 		return "", err
 	}
 
 	// create ${dataDir}/member/wal
-	err = os.MkdirAll(datadir.ToWalDir(dataDir), 0700)
+	err = os.MkdirAll(datadir.ToWALDir(dataDir), 0o700)
 	if err != nil {
 		return "", err
 	}
@@ -260,19 +252,19 @@ func createWALFileWithSnapshotRecord(cfg config.ServerConfig, snapshotTerm, snap
 	}()
 
 	walSnap := walpb.Snapshot{
-		Index: snapshotIndex,
-		Term:  snapshotTerm,
+		Index: &snapshotIndex,
+		Term:  &snapshotTerm,
 		ConfState: &raftpb.ConfState{
 			Voters:    []uint64{0x00ffca74},
-			AutoLeave: false,
+			AutoLeave: new(false),
 		},
 	}
 
-	if err = w.SaveSnapshot(walSnap); err != nil {
+	if err = w.SaveSnapshot(&walSnap); err != nil {
 		return err
 	}
 
-	return w.Save(raftpb.HardState{Term: snapshotTerm, Vote: 3, Commit: snapshotIndex}, nil)
+	return w.Save(&raftpb.HardState{Term: &snapshotTerm, Vote: new(uint64(3)), Commit: &snapshotIndex}, nil)
 }
 
 func createSnapshotAndBackendDB(cfg config.ServerConfig, snapshotTerm, snapshotIndex uint64) error {
@@ -280,19 +272,6 @@ func createSnapshotAndBackendDB(cfg config.ServerConfig, snapshotTerm, snapshotI
 
 	confState := raftpb.ConfState{
 		Voters: []uint64{1, 2, 3},
-	}
-
-	// create snapshot file
-	ss := snap.New(cfg.Logger, cfg.SnapDir())
-	if err = ss.SaveSnap(raftpb.Snapshot{
-		Data: []byte("{}"),
-		Metadata: raftpb.SnapshotMetadata{
-			ConfState: confState,
-			Index:     snapshotIndex,
-			Term:      snapshotTerm,
-		},
-	}); err != nil {
-		return err
 	}
 
 	// create snapshot db file: "%016x.snap.db"

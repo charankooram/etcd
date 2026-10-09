@@ -16,6 +16,8 @@ package adapter
 
 import (
 	"context"
+	"io"
+	"maps"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -38,18 +40,16 @@ func (ss *chanServerStream) SendHeader(md metadata.MD) error {
 	}
 	outmd := make(map[string][]string)
 	for _, h := range append(ss.headers, md) {
-		for k, v := range h {
-			outmd[k] = v
-		}
+		maps.Copy(outmd, h)
 	}
 	select {
 	case ss.headerc <- outmd:
 		ss.headerc = nil
 		ss.headers = nil
 		return nil
-	case <-ss.Context().Done():
+	case <-ss.Context().Done(): //nolint:staticcheck // TODO: remove for a supported version
 	}
-	return ss.Context().Err()
+	return ss.Context().Err() //nolint:staticcheck // TODO: remove for a supported version
 }
 
 func (ss *chanServerStream) SetHeader(md metadata.MD) error {
@@ -140,7 +140,8 @@ func (s *chanStream) RecvMsg(m any) error {
 }
 
 func newPipeStream(ctx context.Context, ssHandler func(chanServerStream) error) chanClientStream {
-	// ch1 is buffered so server can send error on close
+	// ch1 is buffered so the server can deliver a terminal status
+	// (real error or io.EOF) after the handler returns.
 	ch1, ch2 := make(chan any, 1), make(chan any)
 	headerc, trailerc := make(chan metadata.MD, 1), make(chan metadata.MD, 1)
 
@@ -153,12 +154,17 @@ func newPipeStream(ctx context.Context, ssHandler func(chanServerStream) error) 
 	ss := chanServerStream{headerc, trailerc, srv, nil}
 
 	go func() {
-		if err := ssHandler(ss); err != nil {
-			select {
-			case srv.sendc <- err:
-			case <-sctx.Done():
-			case <-cctx.Done():
-			}
+		err := ssHandler(ss)
+		if err == nil {
+			// nil means the handler completed successfully;
+			// the gRPC ClientStream contract requires io.EOF:
+			// https://github.com/grpc/grpc-go/blob/v1.80.0/stream.go#L139-L147
+			err = io.EOF
+		}
+		select {
+		case srv.sendc <- err:
+		case <-sctx.Done():
+		case <-cctx.Done():
 		}
 		scancel()
 		ccancel()

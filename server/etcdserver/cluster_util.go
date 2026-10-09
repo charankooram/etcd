@@ -25,13 +25,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/metadata"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/etcdserver/errors"
 )
 
@@ -170,14 +171,14 @@ func getMembersVersions(lg *zap.Logger, cl *membership.RaftCluster, local types.
 // if the downgrade enabled status is true, the version window is [oneMinorHigher, oneMinorHigher]
 // if the downgrade is not enabled, the version window is [MinClusterVersion, localVersion]
 func allowedVersionRange(downgradeEnabled bool) (minV *semver.Version, maxV *semver.Version) {
-	minV = semver.Must(semver.NewVersion(version.MinClusterVersion))
-	maxV = semver.Must(semver.NewVersion(version.Version))
-	maxV = &semver.Version{Major: maxV.Major, Minor: maxV.Minor}
+	minV = semver.MustParse(version.MinClusterVersion)
+	maxV = semver.MustParse(version.Version)
+	maxV = semver.New(maxV.Major(), maxV.Minor(), 0, "", "")
 
 	if downgradeEnabled {
 		// Todo: handle the case that downgrading from higher major version(e.g. downgrade from v4.0 to v3.x)
-		maxV.Minor = maxV.Minor + 1
-		minV = &semver.Version{Major: maxV.Major, Minor: maxV.Minor}
+		maxV = semver.New(maxV.Major(), maxV.Minor()+1, 0, "", "")
+		minV = semver.New(maxV.Major(), maxV.Minor(), 0, "", "")
 	}
 	return minV, maxV
 }
@@ -214,7 +215,7 @@ func isCompatibleWithVers(lg *zap.Logger, vers map[string]*version.Versions, loc
 			)
 			continue
 		}
-		if clusterv.LessThan(*minV) {
+		if clusterv.LessThan(minV) {
 			lg.Warn(
 				"cluster version of remote member is not compatible; too low",
 				zap.String("remote-member-id", id),
@@ -223,7 +224,7 @@ func isCompatibleWithVers(lg *zap.Logger, vers map[string]*version.Versions, loc
 			)
 			return false
 		}
-		if maxV.LessThan(*clusterv) {
+		if maxV.LessThan(clusterv) {
 			lg.Warn(
 				"cluster version of remote member is not compatible; too high",
 				zap.String("remote-member-id", id),
@@ -300,11 +301,25 @@ func promoteMemberHTTP(ctx context.Context, url string, id uint64, peerRt http.R
 	}
 	// TODO: refactor member http handler code
 	// cannot import etcdhttp, so manually construct url
-	requestUrl := url + "/members/promote/" + fmt.Sprintf("%d", id)
-	req, err := http.NewRequest(http.MethodPost, requestUrl, nil)
+	requestURL := url + "/members/promote/" + fmt.Sprintf("%d", id)
+	req, err := http.NewRequest(http.MethodPost, requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
+
+	// add the auth token via HTTP header if present in gRPC metadata
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		ts, ok := md[rpctypes.TokenFieldNameGRPC]
+		if !ok {
+			ts, ok = md[rpctypes.TokenFieldNameSwagger]
+		}
+
+		if ok && len(ts) > 0 {
+			token := ts[0]
+			req.Header.Set("Authorization", token)
+		}
+	}
+
 	req = req.WithContext(ctx)
 	resp, err := cc.Do(req)
 	if err != nil {
@@ -327,14 +342,14 @@ func promoteMemberHTTP(ctx context.Context, url string, id uint64, peerRt http.R
 		if strings.Contains(string(b), membership.ErrMemberNotLearner.Error()) {
 			return nil, membership.ErrMemberNotLearner
 		}
-		return nil, fmt.Errorf("member promote: unknown error(%s)", string(b))
+		return nil, fmt.Errorf("member promote: unknown error(%s)", b)
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, membership.ErrIDNotFound
 	}
 
 	if resp.StatusCode != http.StatusOK { // all other types of errors
-		return nil, fmt.Errorf("member promote: unknown error(%s)", string(b))
+		return nil, fmt.Errorf("member promote: unknown error(%s)", b)
 	}
 
 	var membs []*membership.Member
@@ -353,13 +368,12 @@ func getDowngradeEnabledFromRemotePeers(lg *zap.Logger, cl *membership.RaftClust
 			continue
 		}
 		enable, err := getDowngradeEnabled(lg, m, rt, timeout)
-		if err != nil {
-			lg.Warn("failed to get downgrade enabled status", zap.String("remote-member-id", m.ID.String()), zap.Error(err))
-		} else {
+		if err == nil {
 			// Since the "/downgrade/enabled" serves linearized data,
 			// this function can return once it gets a non-error response from the endpoint.
 			return enable
 		}
+		lg.Warn("failed to get downgrade enabled status", zap.String("remote-member-id", m.ID.String()), zap.Error(err))
 	}
 	return false
 }
@@ -421,24 +435,13 @@ func getDowngradeEnabled(lg *zap.Logger, m *membership.Member, rt http.RoundTrip
 func convertToClusterVersion(v string) (*semver.Version, error) {
 	ver, err := semver.NewVersion(v)
 	if err != nil {
-		// allow input version format Major.Minor
+		// allow input version format Major.Minor()
 		ver, err = semver.NewVersion(v + ".0")
 		if err != nil {
 			return nil, errors.ErrWrongDowngradeVersionFormat
 		}
 	}
 	// cluster version only keeps major.minor, remove patch version
-	ver = &semver.Version{Major: ver.Major, Minor: ver.Minor}
+	ver = semver.New(ver.Major(), ver.Minor(), 0, "", "")
 	return ver, nil
-}
-
-func GetMembershipInfoInV2Format(lg *zap.Logger, cl *membership.RaftCluster) []byte {
-	var st v2store.Store
-	st = v2store.New(StoreClusterPrefix, StoreKeysPrefix)
-	cl.Store(st)
-	d, err := st.SaveNoCopy()
-	if err != nil {
-		lg.Panic("failed to save v2 store", zap.Error(err))
-	}
-	return d
 }

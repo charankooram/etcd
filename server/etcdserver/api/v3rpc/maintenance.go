@@ -17,6 +17,7 @@ package v3rpc
 import (
 	"context"
 	"crypto/sha256"
+	errorspkg "errors"
 	"io"
 	"time"
 
@@ -26,10 +27,12 @@ import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/api/v3/version"
+	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/apply"
 	"go.etcd.io/etcd/server/v3/etcdserver/errors"
 	serverversion "go.etcd.io/etcd/server/v3/etcdserver/version"
+	"go.etcd.io/etcd/server/v3/storage"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/server/v3/storage/schema"
@@ -42,6 +45,10 @@ type KVGetter interface {
 
 type BackendGetter interface {
 	Backend() backend.Backend
+}
+
+type Defrager interface {
+	Defragment() error
 }
 
 type Alarmer interface {
@@ -63,23 +70,46 @@ type ClusterStatusGetter interface {
 	IsLearner() bool
 }
 
+type ConfigGetter interface {
+	Config() config.ServerConfig
+}
+
 type maintenanceServer struct {
 	lg     *zap.Logger
 	rg     apply.RaftStatusGetter
 	hasher mvcc.HashStorage
 	bg     BackendGetter
+	defrag Defrager
 	a      Alarmer
 	lt     LeaderTransferrer
 	hdr    header
 	cs     ClusterStatusGetter
 	d      Downgrader
 	vs     serverversion.Server
+	cg     ConfigGetter
 
 	healthNotifier notifier
+
+	// we want compile errors if new methods are added
+	pb.UnsafeMaintenanceServer
 }
 
 func NewMaintenanceServer(s *etcdserver.EtcdServer, healthNotifier notifier) pb.MaintenanceServer {
-	srv := &maintenanceServer{lg: s.Cfg.Logger, rg: s, hasher: s.KV().HashStorage(), bg: s, a: s, lt: s, hdr: newHeader(s), cs: s, d: s, vs: etcdserver.NewServerVersionAdapter(s), healthNotifier: healthNotifier}
+	srv := &maintenanceServer{
+		lg:             s.Cfg.Logger,
+		rg:             s,
+		hasher:         s.KV().HashStorage(),
+		bg:             s,
+		defrag:         s,
+		a:              s,
+		lt:             s,
+		hdr:            newHeader(s),
+		cs:             s,
+		d:              s,
+		vs:             etcdserver.NewServerVersionAdapter(s),
+		healthNotifier: healthNotifier,
+		cg:             s,
+	}
 	if srv.lg == nil {
 		srv.lg = zap.NewNop()
 	}
@@ -90,13 +120,18 @@ func (ms *maintenanceServer) Defragment(ctx context.Context, sr *pb.DefragmentRe
 	ms.lg.Info("starting defragment")
 	ms.healthNotifier.defragStarted()
 	defer ms.healthNotifier.defragFinished()
-	err := ms.bg.Backend().Defrag()
+	err := ms.defrag.Defragment()
 	if err != nil {
 		ms.lg.Warn("failed to defragment", zap.Error(err))
 		return nil, togRPCError(err)
 	}
 	ms.lg.Info("finished defragment")
-	return &pb.DefragmentResponse{}, nil
+	// fill the header after the defrag returns: a defrag can take long enough
+	// for leadership to move, and callers read header.leader_id to decide
+	// whether they still need to transfer leadership before restarting a member.
+	resp := &pb.DefragmentResponse{Header: &pb.ResponseHeader{}}
+	ms.hdr.fill(resp.Header)
+	return resp, nil
 }
 
 // big enough size to hold >1 OS pages in the buffer
@@ -144,7 +179,7 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 		buf := make([]byte, snapshotSendBufferSize)
 
 		n, err := io.ReadFull(pr, buf)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		if err != nil && !errorspkg.Is(err, io.EOF) && !errorspkg.Is(err, io.ErrUnexpectedEOF) {
 			return togRPCError(err)
 		}
 		sent += int64(n)
@@ -158,10 +193,13 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 		// No, the client will still receive non-nil response
 		// until server closes the stream with EOF
 		resp := &pb.SnapshotResponse{
+			Header:         &pb.ResponseHeader{},
 			RemainingBytes: uint64(total - sent),
 			Blob:           buf[:n],
 			Version:        storageVersion,
 		}
+		// The live store revision may differ from the snapshot's revision.
+		ms.hdr.fillWithoutRevision(resp.Header)
 		if err = srv.Send(resp); err != nil {
 			return togRPCError(err)
 		}
@@ -176,7 +214,8 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 		zap.Int64("total-bytes", total),
 		zap.Int("checksum-size", len(sha)),
 	)
-	hresp := &pb.SnapshotResponse{RemainingBytes: 0, Blob: sha, Version: storageVersion}
+	hresp := &pb.SnapshotResponse{Header: &pb.ResponseHeader{}, RemainingBytes: 0, Blob: sha, Version: storageVersion}
+	ms.hdr.fillWithoutRevision(hresp.Header)
 	if err := srv.Send(hresp); err != nil {
 		return togRPCError(err)
 	}
@@ -241,9 +280,20 @@ func (ms *maintenanceServer) Status(ctx context.Context, ar *pb.StatusRequest) (
 		DbSize:           ms.bg.Backend().Size(),
 		DbSizeInUse:      ms.bg.Backend().SizeInUse(),
 		IsLearner:        ms.cs.IsLearner(),
+		DbSizeQuota:      ms.cg.Config().QuotaBackendBytes,
+		DowngradeInfo:    &pb.DowngradeInfo{Enabled: false},
+	}
+	if resp.DbSizeQuota == 0 {
+		resp.DbSizeQuota = storage.DefaultQuotaBytes
 	}
 	if storageVersion := ms.vs.GetStorageVersion(); storageVersion != nil {
 		resp.StorageVersion = storageVersion.String()
+	}
+	if downgradeInfo := ms.vs.GetDowngradeInfo(); downgradeInfo != nil {
+		resp.DowngradeInfo = &pb.DowngradeInfo{
+			Enabled:       downgradeInfo.Enabled,
+			TargetVersion: downgradeInfo.TargetVersion,
+		}
 	}
 	if resp.Leader == raft.None {
 		resp.Errors = append(resp.Errors, errors.ErrNoLeader.Error())
@@ -255,14 +305,16 @@ func (ms *maintenanceServer) Status(ctx context.Context, ar *pb.StatusRequest) (
 }
 
 func (ms *maintenanceServer) MoveLeader(ctx context.Context, tr *pb.MoveLeaderRequest) (*pb.MoveLeaderResponse, error) {
-	if ms.rg.MemberId() != ms.rg.Leader() {
+	if ms.rg.MemberID() != ms.rg.Leader() {
 		return nil, rpctypes.ErrGRPCNotLeader
 	}
 
 	if err := ms.lt.MoveLeader(ctx, uint64(ms.rg.Leader()), tr.TargetID); err != nil {
 		return nil, togRPCError(err)
 	}
-	return &pb.MoveLeaderResponse{}, nil
+	resp := &pb.MoveLeaderResponse{Header: &pb.ResponseHeader{}}
+	ms.hdr.fill(resp.Header)
+	return resp, nil
 }
 
 func (ms *maintenanceServer) Downgrade(ctx context.Context, r *pb.DowngradeRequest) (*pb.DowngradeResponse, error) {
@@ -311,8 +363,22 @@ func (ams *authMaintenanceServer) HashKV(ctx context.Context, r *pb.HashKVReques
 	return ams.maintenanceServer.HashKV(ctx, r)
 }
 
+func (ams *authMaintenanceServer) Alarm(ctx context.Context, ar *pb.AlarmRequest) (*pb.AlarmResponse, error) {
+	switch ar.GetAction() {
+	case pb.AlarmRequest_GET:
+		if err := ams.requireAuthInfo(ctx); err != nil {
+			return nil, togRPCError(err)
+		}
+	default:
+		if err := ams.isPermitted(ctx); err != nil {
+			return nil, togRPCError(err)
+		}
+	}
+	return ams.maintenanceServer.Alarm(ctx, ar)
+}
+
 func (ams *authMaintenanceServer) Status(ctx context.Context, ar *pb.StatusRequest) (*pb.StatusResponse, error) {
-	if err := ams.isPermitted(ctx); err != nil {
+	if err := ams.requireAuthInfo(ctx); err != nil {
 		return nil, togRPCError(err)
 	}
 

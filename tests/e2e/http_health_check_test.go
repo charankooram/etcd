@@ -150,7 +150,7 @@ func TestHTTPHealthHandler(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			clus, err := e2e.NewEtcdProcessCluster(ctx, t, tc.clusterOptions...)
 			require.NoError(t, err)
@@ -172,33 +172,31 @@ func TestHTTPHealthHandler(t *testing.T) {
 	}
 }
 
-var (
-	defaultHealthCheckConfigs = []healthCheckConfig{
-		{
-			url:                    "/livez",
-			expectedStatusCode:     http.StatusOK,
-			expectedRespSubStrings: []string{`ok`},
+var defaultHealthCheckConfigs = []healthCheckConfig{
+	{
+		url:                    "/livez",
+		expectedStatusCode:     http.StatusOK,
+		expectedRespSubStrings: []string{`ok`},
+	},
+	{
+		url:                    "/readyz",
+		expectedStatusCode:     http.StatusOK,
+		expectedRespSubStrings: []string{`ok`},
+	},
+	{
+		url:                    "/livez?verbose=true",
+		expectedStatusCode:     http.StatusOK,
+		expectedRespSubStrings: []string{`[+]serializable_read ok`},
+	},
+	{
+		url:                "/readyz?verbose=true",
+		expectedStatusCode: http.StatusOK,
+		expectedRespSubStrings: []string{
+			`[+]serializable_read ok`,
+			`[+]data_corruption ok`,
 		},
-		{
-			url:                    "/readyz",
-			expectedStatusCode:     http.StatusOK,
-			expectedRespSubStrings: []string{`ok`},
-		},
-		{
-			url:                    "/livez?verbose=true",
-			expectedStatusCode:     http.StatusOK,
-			expectedRespSubStrings: []string{`[+]serializable_read ok`},
-		},
-		{
-			url:                "/readyz?verbose=true",
-			expectedStatusCode: http.StatusOK,
-			expectedRespSubStrings: []string{
-				`[+]serializable_read ok`,
-				`[+]data_corruption ok`,
-			},
-		},
-	}
-)
+	},
+}
 
 func TestHTTPLivezReadyzHandler(t *testing.T) {
 	e2e.BeforeTest(t)
@@ -315,7 +313,7 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			clus, err := e2e.NewEtcdProcessCluster(ctx, t, tc.clusterOptions...)
 			require.NoError(t, err)
@@ -338,8 +336,8 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 }
 
 func doHealthCheckAndVerify(t *testing.T, client *http.Client, url string, expectTimeoutError bool, expectStatusCode int, expectRespSubStrings []string) {
-	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), healthCheckTimeout)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	require.NoErrorf(t, err, "failed to creat request %+v", err)
 	resp, herr := client.Do(req)
 	cancel()
@@ -366,10 +364,8 @@ func triggerNoSpaceAlarm(ctx context.Context, t *testing.T, clus *e2e.EtcdProces
 	buf := strings.Repeat("b", os.Getpagesize())
 	etcdctl := clus.Etcdctl()
 	for {
-		if err := etcdctl.Put(ctx, "foo", buf, config.PutOptions{}); err != nil {
-			if !strings.Contains(err.Error(), "etcdserver: mvcc: database space exceeded") {
-				t.Fatal(err)
-			}
+		if _, err := etcdctl.Put(ctx, "foo", buf, config.PutOptions{}); err != nil {
+			require.ErrorContains(t, err, "etcdserver: mvcc: database space exceeded")
 			break
 		}
 	}
@@ -379,7 +375,8 @@ func triggerSlowApply(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCl
 	// the following proposal will be blocked at applying stage
 	// because when apply index < committed index, linearizable read would time out.
 	require.NoError(t, clus.Procs[0].Failpoints().SetupHTTP(ctx, "beforeApplyOneEntryNormal", fmt.Sprintf(`sleep("%s")`, duration)))
-	require.NoError(t, clus.Procs[1].Etcdctl().Put(ctx, "foo", "bar", config.PutOptions{}))
+	_, err := clus.Procs[1].Etcdctl().Put(ctx, "foo", "bar", config.PutOptions{})
+	require.NoError(t, err)
 }
 
 func blackhole(_ context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, _ time.Duration) {
@@ -410,7 +407,7 @@ func triggerSlowBufferWriteBackWithAuth(ctx context.Context, t *testing.T, clus 
 func triggerCorrupt(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, _ time.Duration) {
 	etcdctl := clus.Procs[0].Etcdctl()
 	for i := 0; i < 10; i++ {
-		err := etcdctl.Put(ctx, "foo", "bar", config.PutOptions{})
+		_, err := etcdctl.Put(ctx, "foo", "bar", config.PutOptions{})
 		require.NoError(t, err)
 	}
 	err := clus.Procs[0].Kill()

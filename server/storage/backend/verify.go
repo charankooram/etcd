@@ -15,7 +15,6 @@
 package backend
 
 import (
-	"fmt"
 	"runtime/debug"
 	"strings"
 
@@ -26,7 +25,7 @@ import (
 )
 
 const (
-	ENV_VERIFY_VALUE_LOCK verify.VerificationType = "lock"
+	EnvVerifyValueLock verify.VerificationType = "lock"
 )
 
 func ValidateCalledInsideApply(lg *zap.Logger) {
@@ -57,7 +56,7 @@ func ValidateCalledInsideUnittest(lg *zap.Logger) {
 }
 
 func verifyLockEnabled() bool {
-	return verify.IsVerificationEnabled(ENV_VERIFY_VALUE_LOCK)
+	return verify.IsVerificationEnabled(EnvVerifyValueLock)
 }
 
 func insideApply() bool {
@@ -72,9 +71,9 @@ func insideUnittest() bool {
 
 // VerifyBackendConsistency verifies data in ReadTx and BatchTx are consistent.
 func VerifyBackendConsistency(b Backend, lg *zap.Logger, skipSafeRangeBucket bool, bucket ...Bucket) {
-	verify.Verify(func() {
+	verify.Verify("bucket data mismatch", func() (bool, map[string]any) {
 		if b == nil {
-			return
+			return true, nil
 		}
 		if lg != nil {
 			lg.Debug("verifyBackendConsistency", zap.Bool("skipSafeRangeBucket", skipSafeRangeBucket))
@@ -87,12 +86,15 @@ func VerifyBackendConsistency(b Backend, lg *zap.Logger, skipSafeRangeBucket boo
 			if skipSafeRangeBucket && bkt.IsSafeRangeBucket() {
 				continue
 			}
-			unsafeVerifyTxConsistency(b, bkt)
+			if ok, details := unsafeVerifyTxConsistency(b, bkt); !ok {
+				return false, details
+			}
 		}
+		return true, nil
 	})
 }
 
-func unsafeVerifyTxConsistency(b Backend, bucket Bucket) {
+func unsafeVerifyTxConsistency(b Backend, bucket Bucket) (bool, map[string]any) {
 	dataFromWriteTxn := map[string]string{}
 	b.BatchTx().UnsafeForEach(bucket, func(k, v []byte) error {
 		dataFromWriteTxn[string(k)] = string(v)
@@ -104,6 +106,12 @@ func unsafeVerifyTxConsistency(b Backend, bucket Bucket) {
 		return nil
 	})
 	if diff := cmp.Diff(dataFromWriteTxn, dataFromReadTxn); diff != "" {
-		panic(fmt.Sprintf("bucket %s data mismatch\nwrite TXN: %v\nread TXN: %v\ndiff: %s", bucket.String(), dataFromWriteTxn, dataFromReadTxn, diff))
+		return false, map[string]any{
+			"bucket":    bucket.String(),
+			"write TXN": dataFromWriteTxn,
+			"read TXN":  dataFromReadTxn,
+			"diff":      diff,
+		}
 	}
+	return true, nil
 }

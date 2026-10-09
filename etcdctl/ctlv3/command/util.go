@@ -34,10 +34,10 @@ import (
 )
 
 func printKV(isHex bool, valueOnly bool, kv *pb.KeyValue) {
-	k, v := string(kv.Key), string(kv.Value)
+	k, v := string(kv.GetKey()), string(kv.GetValue())
 	if isHex {
-		k = addHexPrefix(hex.EncodeToString(kv.Key))
-		v = addHexPrefix(hex.EncodeToString(kv.Value))
+		k = addHexPrefix(hex.EncodeToString(kv.GetKey()))
+		v = addHexPrefix(hex.EncodeToString(kv.GetValue()))
 	}
 	if !valueOnly {
 		fmt.Println(k)
@@ -56,16 +56,17 @@ func addHexPrefix(s string) string {
 	return string(ns)
 }
 
+var argsRegexp = regexp.MustCompile(`"(?:[^"\\]|\\.)*"|'[^']*'|[^'"\s]\S*[^'"\s]?`)
+
 func Argify(s string) []string {
-	r := regexp.MustCompile(`"(?:[^"\\]|\\.)*"|'[^']*'|[^'"\s]\S*[^'"\s]?`)
-	args := r.FindAllString(s, -1)
+	args := argsRegexp.FindAllString(s, -1)
 	for i := range args {
 		if len(args[i]) == 0 {
 			continue
 		}
 		if args[i][0] == '\'' {
 			// 'single-quoted string'
-			args[i] = args[i][1 : len(args)-1]
+			args[i] = args[i][1 : len(args[i])-1]
 		} else if args[i][0] == '"' {
 			// "double quoted string"
 			if _, err := fmt.Sscanf(args[i], "%q", &args[i]); err != nil {

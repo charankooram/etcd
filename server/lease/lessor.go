@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 	"go.uber.org/zap"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -42,8 +42,8 @@ const MaxLeaseTTL = 9000000000
 var (
 	forever = time.Time{}
 
-	// maximum number of leases to revoke per second; configurable for tests
-	leaseRevokeRate = 1000
+	// default number of leases to revoke per second; configurable for tests
+	defaultLeaseRevokeRate = 1000
 
 	// maximum number of lease checkpoints recorded to the consensus log per second; configurable for tests
 	leaseCheckpointRate = 1000
@@ -170,6 +170,9 @@ type lessor struct {
 	// requests for shorter TTLs are extended to the minimum TTL.
 	minLeaseTTL int64
 
+	// maximum number of leases to revoke per second
+	leaseRevokeRate int
+
 	expiredC chan []*Lease
 	// stopC is a channel whose closure indicates that the lessor should be stopped.
 	stopC chan struct{}
@@ -198,6 +201,8 @@ type LessorConfig struct {
 	CheckpointInterval         time.Duration
 	ExpiredLeasesRetryInterval time.Duration
 	CheckpointPersist          bool
+
+	leaseRevokeRate int
 }
 
 func NewLessor(lg *zap.Logger, b backend.Backend, cluster cluster, cfg LessorConfig) Lessor {
@@ -207,11 +212,15 @@ func NewLessor(lg *zap.Logger, b backend.Backend, cluster cluster, cfg LessorCon
 func newLessor(lg *zap.Logger, b backend.Backend, cluster cluster, cfg LessorConfig) *lessor {
 	checkpointInterval := cfg.CheckpointInterval
 	expiredLeaseRetryInterval := cfg.ExpiredLeasesRetryInterval
+	leaseRevokeRate := cfg.leaseRevokeRate
 	if checkpointInterval == 0 {
 		checkpointInterval = defaultLeaseCheckpointInterval
 	}
 	if expiredLeaseRetryInterval == 0 {
 		expiredLeaseRetryInterval = defaultExpiredleaseRetryInterval
+	}
+	if leaseRevokeRate == 0 {
+		leaseRevokeRate = defaultLeaseRevokeRate
 	}
 	l := &lessor{
 		leaseMap:                  make(map[LeaseID]*Lease),
@@ -220,6 +229,7 @@ func newLessor(lg *zap.Logger, b backend.Backend, cluster cluster, cfg LessorCon
 		leaseCheckpointHeap:       make(LeaseQueue, 0),
 		b:                         b,
 		minLeaseTTL:               cfg.MinLeaseTTL,
+		leaseRevokeRate:           leaseRevokeRate,
 		checkpointInterval:        checkpointInterval,
 		expiredLeaseRetryInterval: expiredLeaseRetryInterval,
 		checkpointPersist:         cfg.CheckpointPersist,
@@ -418,6 +428,8 @@ func (le *lessor) Renew(id LeaseID) (int64, error) {
 		}
 	}
 
+	// gofail: var beforeCheckpointInLeaseRenew struct{}
+
 	// Clear remaining TTL when we renew if it is set
 	// By applying a RAFT entry only when the remainingTTL is already set, we limit the number
 	// of RAFT entries written per lease to a max of 2 per checkpoint interval.
@@ -428,6 +440,12 @@ func (le *lessor) Renew(id LeaseID) (int64, error) {
 	}
 
 	le.mu.Lock()
+	// Re-check in case the lease was revoked immediately after the previous check
+	l = le.leaseMap[id]
+	if l == nil {
+		le.mu.Unlock()
+		return -1, ErrLeaseNotFound
+	}
 	l.refresh(0)
 	item := &LeaseWithTime{id: l.ID, time: l.expiry}
 	le.leaseExpiredNotifier.RegisterOrUpdate(item)
@@ -473,7 +491,7 @@ func (le *lessor) Promote(extend time.Duration) {
 		le.scheduleCheckpointIfNeeded(l)
 	}
 
-	if len(le.leaseMap) < leaseRevokeRate {
+	if len(le.leaseMap) < le.leaseRevokeRate {
 		// no possibility of lease pile-up
 		return
 	}
@@ -487,7 +505,7 @@ func (le *lessor) Promote(extend time.Duration) {
 	expires := 0
 	// have fewer expires than the total revoke rate so piled up leases
 	// don't consume the entire revoke limit
-	targetExpiresPerSecond := (3 * leaseRevokeRate) / 4
+	targetExpiresPerSecond := (3 * le.leaseRevokeRate) / 4
 	for _, l := range leases {
 		remaining := l.Remaining()
 		if remaining > nextWindow {
@@ -623,7 +641,7 @@ func (le *lessor) revokeExpiredLeases() {
 	var ls []*Lease
 
 	// rate limit
-	revokeLimit := leaseRevokeRate / 2
+	revokeLimit := le.leaseRevokeRate / 2
 
 	le.mu.RLock()
 	if le.isPrimary() {

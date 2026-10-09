@@ -15,7 +15,7 @@
 //go:build tools
 
 // This file implements that pattern:
-// https://github.com/golang/go/wiki/Modules#how-can-i-track-tool-dependencies-for-a-module
+// https://go.dev/wiki/Modules#how-can-i-track-tool-dependencies-for-a-module
 // for etcd. Thanks to this file 'go mod tidy' does not removes dependencies.
 
 package tools
@@ -23,19 +23,22 @@ package tools
 import (
 	_ "github.com/alexfalkowski/gocovmerge"
 	_ "github.com/appscodelabs/license-bill-of-materials"
-	_ "github.com/chzchzchz/goword"
 	_ "github.com/cloudflare/cfssl/cmd/cfssl"
 	_ "github.com/cloudflare/cfssl/cmd/cfssljson"
-	_ "github.com/golangci/golangci-lint/cmd/golangci-lint"
-	_ "github.com/google/addlicense"
+	_ "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
 	_ "github.com/google/yamlfmt/cmd/yamlfmt"
 	_ "github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway"
 	_ "github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2"
-	_ "github.com/mikefarah/yq/v4"
-	_ "go.etcd.io/gofail"
-	_ "go.etcd.io/protodoc"
-	_ "go.etcd.io/raft/v3"
+	_ "github.com/ryancurrah/gomodguard/cmd/gomodguard"
+	_ "golang.org/x/tools/cmd/goimports"
+	_ "golang.org/x/vuln/cmd/govulncheck"
+	_ "google.golang.org/grpc/cmd/protoc-gen-go-grpc"
+	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
 	_ "gotest.tools/gotestsum"
 	_ "gotest.tools/v3"
 	_ "honnef.co/go/tools/cmd/staticcheck"
+
+	_ "go.etcd.io/gofail"
+	_ "go.etcd.io/protodoc"
+	_ "go.etcd.io/raft/v3"
 )

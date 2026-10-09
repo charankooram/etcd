@@ -15,15 +15,16 @@
 package schema
 
 import (
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/membershippb"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
@@ -56,26 +57,46 @@ func TestValidate(t *testing.T) {
 			name:    `V3.5 schema without term field is correct`,
 			version: version.V3_5,
 			overrideKeys: func(tx backend.UnsafeReadWriter) {
-				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{})
+				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
 			},
 		},
 		{
 			name:    `V3.5 schema with all fields is correct`,
 			version: version.V3_5,
 			overrideKeys: func(tx backend.UnsafeReadWriter) {
-				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{})
+				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
 				UnsafeUpdateConsistentIndex(tx, 1, 1)
 			},
 		},
 		{
 			name:    `V3.6 schema is correct`,
 			version: version.V3_6,
+			overrideKeys: func(tx backend.UnsafeReadWriter) {
+				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
+				UnsafeUpdateConsistentIndex(tx, 1, 1)
+			},
 		},
 		{
-			name:           `V3.7 schema is unknown and should return error`,
-			version:        version.V3_7,
+			name:    `V3.7 is correct`,
+			version: version.V3_7,
+			overrideKeys: func(tx backend.UnsafeReadWriter) {
+				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
+				UnsafeUpdateConsistentIndex(tx, 1, 1)
+			},
+		},
+		{
+			name:    `V3.8 is correct`,
+			version: version.V3_8,
+			overrideKeys: func(tx backend.UnsafeReadWriter) {
+				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
+				UnsafeUpdateConsistentIndex(tx, 1, 1)
+			},
+		},
+		{
+			name:           `V3.9 schema is unknown and should return error`,
+			version:        version.V3_9,
 			expectError:    true,
-			expectErrorMsg: `version "3.7.0" is not supported`,
+			expectErrorMsg: `version "3.9.0" is not supported`,
 		},
 	}
 	for _, tc := range tcs {
@@ -103,28 +124,19 @@ func TestMigrate(t *testing.T) {
 		// Overrides which keys should be set (default based on version)
 		overrideKeys  func(tx backend.UnsafeReadWriter)
 		targetVersion semver.Version
-		walEntries    []etcdserverpb.InternalRaftRequest
+		walEntries    []*etcdserverpb.InternalRaftRequest
 
 		expectVersion  *semver.Version
 		expectError    bool
 		expectErrorMsg string
 	}{
 		// As storage version field was added in v3.6, for v3.5 we will not set it.
-		// For storage to be considered v3.5 it have both confstate and term key set.
-		{
-			name:           `Upgrading v3.5 to v3.6 should be rejected if confstate is not set`,
-			version:        version.V3_5,
-			overrideKeys:   func(tx backend.UnsafeReadWriter) {},
-			targetVersion:  version.V3_6,
-			expectVersion:  nil,
-			expectError:    true,
-			expectErrorMsg: `cannot detect storage schema version: missing confstate information`,
-		},
+		// For storage to be considered v3.5 it has term key set.
 		{
 			name:    `Upgrading v3.5 to v3.6 should be rejected if term is not set`,
 			version: version.V3_5,
 			overrideKeys: func(tx backend.UnsafeReadWriter) {
-				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{})
+				MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
 			},
 			targetVersion:  version.V3_6,
 			expectVersion:  nil,
@@ -156,26 +168,50 @@ func TestMigrate(t *testing.T) {
 			expectVersion: &version.V3_7,
 		},
 		{
-			name:           "Upgrading 3.6 to v3.7 is not supported",
-			version:        version.V3_6,
-			targetVersion:  version.V3_7,
-			expectVersion:  &version.V3_6,
-			expectError:    true,
-			expectErrorMsg: `cannot create migration plan: version "3.7.0" is not supported`,
+			name:          "Upgrading 3.6 to v3.7 should work",
+			version:       version.V3_6,
+			targetVersion: version.V3_7,
+			expectVersion: &version.V3_7,
 		},
 		{
-			name:           "Downgrading v3.7 to v3.6 is not supported",
-			version:        version.V3_7,
-			targetVersion:  version.V3_6,
-			expectVersion:  &version.V3_7,
+			name:          "Upgrading 3.7 to v3.8 should work",
+			version:       version.V3_7,
+			targetVersion: version.V3_8,
+			expectVersion: &version.V3_8,
+		},
+		{
+			name:           "Upgrading 3.8 to v3.9 is not supported",
+			version:        version.V3_8,
+			targetVersion:  version.V3_9,
+			expectVersion:  &version.V3_8,
 			expectError:    true,
-			expectErrorMsg: `cannot create migration plan: version "3.7.0" is not supported`,
+			expectErrorMsg: `cannot create migration plan: version "3.9.0" is not supported`,
+		},
+		{
+			name:          "Downgrading v3.7 to v3.6 should work",
+			version:       version.V3_7,
+			targetVersion: version.V3_6,
+			expectVersion: &version.V3_6,
+		},
+		{
+			name:          "Downgrading v3.8 to v3.7 should work",
+			version:       version.V3_8,
+			targetVersion: version.V3_7,
+			expectVersion: &version.V3_7,
+		},
+		{
+			name:           "Downgrading v3.9 to v3.8 is not supported",
+			version:        version.V3_9,
+			targetVersion:  version.V3_8,
+			expectVersion:  &version.V3_9,
+			expectError:    true,
+			expectErrorMsg: `cannot create migration plan: version "3.9.0" is not supported`,
 		},
 		{
 			name:          "Downgrading v3.6 to v3.5 works as there are no v3.6 wal entries",
 			version:       version.V3_6,
 			targetVersion: version.V3_5,
-			walEntries: []etcdserverpb.InternalRaftRequest{
+			walEntries: []*etcdserverpb.InternalRaftRequest{
 				{Range: &etcdserverpb.RangeRequest{Key: []byte("\x00"), RangeEnd: []byte("\xff")}},
 			},
 			expectVersion: nil,
@@ -184,8 +220,8 @@ func TestMigrate(t *testing.T) {
 			name:          "Downgrading v3.6 to v3.5 fails if there are newer WAL entries",
 			version:       version.V3_6,
 			targetVersion: version.V3_5,
-			walEntries: []etcdserverpb.InternalRaftRequest{
-				{ClusterVersionSet: &membershippb.ClusterVersionSetRequest{Ver: "3.6.0"}},
+			walEntries: []*etcdserverpb.InternalRaftRequest{
+				{DowngradeVersionTest: &etcdserverpb.DowngradeVersionTestRequest{Ver: "3.6.0"}},
 			},
 			expectVersion:  &version.V3_6,
 			expectError:    true,
@@ -218,7 +254,7 @@ func TestMigrate(t *testing.T) {
 			if (err != nil) != tc.expectError {
 				t.Errorf("Migrate(lg, tx, %q) = %+v, expected error: %v", tc.targetVersion, err, tc.expectError)
 			}
-			if err != nil && err.Error() != tc.expectErrorMsg {
+			if err != nil && !strings.Contains(err.Error(), tc.expectErrorMsg) {
 				t.Errorf("Migrate(lg, tx, %q) = %q, expected error message: %q", tc.targetVersion, err, tc.expectErrorMsg)
 			}
 			v := UnsafeReadStorageVersion(b.BatchTx())
@@ -298,9 +334,7 @@ func setupBackendData(t *testing.T, ver semver.Version, overrideKeys func(tx bac
 	t.Helper()
 	be, tmpPath := betesting.NewTmpBackend(t, time.Microsecond, 10)
 	tx := be.BatchTx()
-	if tx == nil {
-		t.Fatal("batch tx is nil")
-	}
+	require.NotNilf(t, tx, "batch tx is nil")
 	tx.Lock()
 	UnsafeCreateMetaBucket(tx)
 	if overrideKeys != nil {
@@ -309,16 +343,26 @@ func setupBackendData(t *testing.T, ver semver.Version, overrideKeys func(tx bac
 		switch ver {
 		case version.V3_4:
 		case version.V3_5:
-			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{})
+			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
 			UnsafeUpdateConsistentIndex(tx, 1, 1)
 		case version.V3_6:
-			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{})
+			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
 			UnsafeUpdateConsistentIndex(tx, 1, 1)
 			UnsafeSetStorageVersion(tx, &version.V3_6)
 		case version.V3_7:
-			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{})
+			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
 			UnsafeUpdateConsistentIndex(tx, 1, 1)
 			UnsafeSetStorageVersion(tx, &version.V3_7)
+			tx.UnsafePut(Meta, []byte("future-key"), []byte(""))
+		case version.V3_8:
+			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
+			UnsafeUpdateConsistentIndex(tx, 1, 1)
+			UnsafeSetStorageVersion(tx, &version.V3_8)
+			tx.UnsafePut(Meta, []byte("future-key"), []byte(""))
+		case version.V3_9:
+			MustUnsafeSaveConfStateToBackend(zap.NewNop(), tx, &raftpb.ConfState{AutoLeave: new(false)})
+			UnsafeUpdateConsistentIndex(tx, 1, 1)
+			UnsafeSetStorageVersion(tx, &version.V3_9)
 			tx.UnsafePut(Meta, []byte("future-key"), []byte(""))
 		default:
 			t.Fatalf("Unsupported storage version")

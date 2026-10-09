@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -27,17 +28,17 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/snapshot"
 	"go.etcd.io/etcd/server/v3/config"
-	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
@@ -117,13 +118,14 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
-	db, err := bolt.Open(dbPath, 0400, &bolt.Options{ReadOnly: true})
+	db, err := bolt.Open(dbPath, 0o400, &bolt.Options{ReadOnly: true})
 	if err != nil {
 		return ds, err
 	}
 	defer db.Close()
 
 	h := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	seenKeys := make(map[string]struct{})
 
 	if err = db.View(func(tx *bolt.Tx) error {
 		// check snapshot file integrity first
@@ -143,27 +145,47 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		for next, _ := c.First(); next != nil; next, _ = c.Next() {
 			b := tx.Bucket(next)
 			if b == nil {
-				return fmt.Errorf("cannot get hash of bucket %s", string(next))
+				return fmt.Errorf("nil bucket: %q", string(next))
 			}
-			if _, err = h.Write(next); err != nil {
-				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
+			_, err = h.Write(next)
+			if err != nil {
+				return fmt.Errorf("cannot hash bucket name: %q err: %w", string(next), err)
 			}
-			iskeyb := (string(next) == "key")
+
+			iskeyb := (bytes.Equal(next, schema.Key.Name()))
 			if err = b.ForEach(func(k, v []byte) error {
-				if _, herr := h.Write(k); herr != nil {
-					return fmt.Errorf("cannot write to bucket %s", herr.Error())
+				_, err = h.Write(k)
+				if err != nil {
+					return fmt.Errorf("cannot hash bucket key: %q err: %w", k, err)
 				}
-				if _, herr := h.Write(v); herr != nil {
-					return fmt.Errorf("cannot write to bucket %s", herr.Error())
+				_, err = h.Write(v)
+				if err != nil {
+					return fmt.Errorf("cannot hash bucket key: %q value: %q err: %w", k, v, err)
 				}
 				if iskeyb {
-					rev := mvcc.BytesToRev(k)
+					var rev mvcc.Revision
+					rev, err = bytesToRev(k)
+					if err != nil {
+						return fmt.Errorf("cannot parse revision key: %q err: %w", k, err)
+					}
 					ds.Revision = rev.Main
+
+					var kv mvccpb.KeyValue
+					err = proto.Unmarshal(v, &kv)
+					if err != nil {
+						return fmt.Errorf("cannot unmarshal value, key: %q value: %q err: %w", k, v, err)
+					}
+					key := string(kv.Key)
+					// refer to https://etcd.io/docs/v3.5/learning/data_model/
+					if !mvcc.IsTombstone(k) {
+						seenKeys[key] = struct{}{}
+					} else {
+						delete(seenKeys, key)
+					}
 				}
-				ds.TotalKey++
 				return nil
 			}); err != nil {
-				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
+				return fmt.Errorf("error during bucket key iteration, name: %q err: %w", string(next), err)
 			}
 		}
 		return nil
@@ -171,8 +193,18 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
+	ds.TotalKey = len(seenKeys)
 	ds.Hash = h.Sum32()
 	return ds, nil
+}
+
+func bytesToRev(b []byte) (rev mvcc.Revision, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%s", r)
+		}
+	}()
+	return mvcc.BytesToRev(b), err
 }
 
 // RestoreConfig configures snapshot restore operation.
@@ -293,7 +325,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 		return err
 	}
 
-	if err := s.updateCIndex(hardstate.Commit, hardstate.Term); err != nil {
+	if err := s.updateCIndex(hardstate.GetCommit(), hardstate.GetTerm()); err != nil {
 		return err
 	}
 
@@ -424,7 +456,7 @@ func (s *v3Manager) copyAndVerifyDB() error {
 
 	outDbPath := s.outDbPath()
 
-	db, dberr := os.OpenFile(outDbPath, os.O_RDWR|os.O_CREATE, 0600)
+	db, dberr := os.OpenFile(outDbPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if dberr != nil {
 		return dberr
 	}
@@ -486,9 +518,9 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		s.cl.AddMember(m, true)
 	}
 
-	m := s.cl.MemberByName(s.name)
-	md := &etcdserverpb.Metadata{NodeID: uint64(m.ID), ClusterID: uint64(s.cl.ID())}
-	metadata, merr := md.Marshal()
+	m := s.cl.MemberByName(s.name) //nolint:staticcheck // See https://github.com/dominikh/go-tools/issues/1698
+	md := &etcdserverpb.Metadata{NodeID: new(uint64(m.ID)), ClusterID: new(uint64(s.cl.ID()))}
+	metadata, merr := proto.Marshal(md)
 	if merr != nil {
 		return nil, merr
 	}
@@ -507,54 +539,42 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		peers[i] = raft.Peer{ID: uint64(id), Context: ctx}
 	}
 
-	ents := make([]raftpb.Entry, len(peers))
+	ents := make([]*raftpb.Entry, len(peers))
 	nodeIDs := make([]uint64, len(peers))
 	for i, p := range peers {
 		nodeIDs[i] = p.ID
 		cc := raftpb.ConfChange{
-			Type:    raftpb.ConfChangeAddNode,
-			NodeID:  p.ID,
+			Type:    raftpb.ConfChangeAddNode.Enum(),
+			NodeId:  new(p.ID),
 			Context: p.Context,
 		}
-		d, err := cc.Marshal()
+		d, err := proto.Marshal(&cc)
 		if err != nil {
 			return nil, err
 		}
-		ents[i] = raftpb.Entry{
-			Type:  raftpb.EntryConfChange,
-			Term:  1,
-			Index: uint64(i + 1),
+		ents[i] = &raftpb.Entry{
+			Type:  raftpb.EntryConfChange.Enum(),
+			Term:  new(uint64(1)),
+			Index: new(uint64(i + 1)),
 			Data:  d,
 		}
 	}
 
 	commit, term := uint64(len(ents)), uint64(1)
 	hardState := raftpb.HardState{
-		Term:   term,
-		Vote:   peers[0].ID,
-		Commit: commit,
+		Term:   new(term),
+		Vote:   new(peers[0].ID),
+		Commit: new(commit),
 	}
-	if err := w.Save(hardState, ents); err != nil {
+	if err := w.Save(&hardState, ents); err != nil {
 		return nil, err
 	}
 
-	confState := raftpb.ConfState{
+	confState := &raftpb.ConfState{
 		Voters: nodeIDs,
 	}
-	raftSnap := raftpb.Snapshot{
-		Data: etcdserver.GetMembershipInfoInV2Format(s.lg, s.cl),
-		Metadata: raftpb.SnapshotMetadata{
-			Index:     commit,
-			Term:      term,
-			ConfState: confState,
-		},
-	}
-	sn := snap.New(s.lg, s.snapDir)
-	if err := sn.SaveSnap(raftSnap); err != nil {
-		return nil, err
-	}
-	snapshot := walpb.Snapshot{Index: commit, Term: term, ConfState: &confState}
-	return &hardState, w.SaveSnapshot(snapshot)
+	snapshot := walpb.Snapshot{Index: new(commit), Term: new(term), ConfState: confState}
+	return &hardState, w.SaveSnapshot(&snapshot)
 }
 
 func (s *v3Manager) updateCIndex(commit uint64, term uint64) error {

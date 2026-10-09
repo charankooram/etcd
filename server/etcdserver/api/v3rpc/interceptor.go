@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/protobuf/proto"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
@@ -49,7 +50,7 @@ func newUnaryInterceptor(s *etcdserver.EtcdServer) grpc.UnaryServerInterceptor {
 			return nil, rpctypes.ErrGRPCNotCapable
 		}
 
-		if s.IsMemberExist(s.MemberId()) && s.IsLearner() && !isRPCSupportedForLearner(req) {
+		if s.IsMemberExist(s.MemberID()) && s.IsLearner() && !isRPCSupportedForLearner(req) {
 			return nil, rpctypes.ErrGRPCNotSupportedForLearner
 		}
 
@@ -113,35 +114,35 @@ func logUnaryRequestStats(ctx context.Context, lg *zap.Logger, warnLatency time.
 		_req, ok := req.(*pb.RangeRequest)
 		if ok {
 			reqCount = 0
-			reqSize = _req.Size()
+			reqSize = proto.Size(_req)
 			reqContent = _req.String()
 		}
 		if _resp != nil {
 			respCount = _resp.GetCount()
-			respSize = _resp.Size()
+			respSize = proto.Size(_resp)
 		}
 	case *pb.PutResponse:
 		_req, ok := req.(*pb.PutRequest)
 		if ok {
 			reqCount = 1
-			reqSize = _req.Size()
+			reqSize = proto.Size(_req)
 			reqContent = pb.NewLoggablePutRequest(_req).String()
 			// redact value field from request content, see PR #9821
 		}
 		if _resp != nil {
 			respCount = 0
-			respSize = _resp.Size()
+			respSize = proto.Size(_resp)
 		}
 	case *pb.DeleteRangeResponse:
 		_req, ok := req.(*pb.DeleteRangeRequest)
 		if ok {
 			reqCount = 0
-			reqSize = _req.Size()
+			reqSize = proto.Size(_req)
 			reqContent = _req.String()
 		}
 		if _resp != nil {
 			respCount = _resp.GetDeleted()
-			respSize = _resp.Size()
+			respSize = proto.Size(_resp)
 		}
 	case *pb.TxnResponse:
 		_req, ok := req.(*pb.TxnRequest)
@@ -150,13 +151,13 @@ func logUnaryRequestStats(ctx context.Context, lg *zap.Logger, warnLatency time.
 				reqCount = int64(len(_req.GetSuccess()))
 				reqSize = 0
 				for _, r := range _req.GetSuccess() {
-					reqSize += r.Size()
+					reqSize += proto.Size(r)
 				}
 			} else {
 				reqCount = int64(len(_req.GetFailure()))
 				reqSize = 0
 				for _, r := range _req.GetFailure() {
-					reqSize += r.Size()
+					reqSize += proto.Size(r)
 				}
 			}
 			reqContent = pb.NewLoggableTxnRequest(_req).String()
@@ -164,7 +165,7 @@ func logUnaryRequestStats(ctx context.Context, lg *zap.Logger, warnLatency time.
 		}
 		if _resp != nil {
 			respCount = 0
-			respSize = _resp.Size()
+			respSize = proto.Size(_resp)
 		}
 	default:
 		reqCount = -1
@@ -181,7 +182,8 @@ func logUnaryRequestStats(ctx context.Context, lg *zap.Logger, warnLatency time.
 }
 
 func logGenericRequestStats(lg *zap.Logger, startTime time.Time, duration time.Duration, remote string, responseType string,
-	reqCount int64, reqSize int, respCount int64, respSize int, reqContent string) {
+	reqCount int64, reqSize int, respCount int64, respSize int, reqContent string,
+) {
 	lg.Debug("request stats",
 		zap.Time("start time", startTime),
 		zap.Duration("time spent", duration),
@@ -196,7 +198,8 @@ func logGenericRequestStats(lg *zap.Logger, startTime time.Time, duration time.D
 }
 
 func logExpensiveRequestStats(lg *zap.Logger, startTime time.Time, duration time.Duration, remote string, responseType string,
-	reqCount int64, reqSize int, respCount int64, respSize int, reqContent string) {
+	reqCount int64, reqSize int, respCount int64, respSize int, reqContent string,
+) {
 	lg.Warn("request stats",
 		zap.Time("start time", startTime),
 		zap.Duration("time spent", duration),
@@ -218,7 +221,7 @@ func newStreamInterceptor(s *etcdserver.EtcdServer) grpc.StreamServerInterceptor
 			return rpctypes.ErrGRPCNotCapable
 		}
 
-		if s.IsMemberExist(s.MemberId()) && s.IsLearner() && info.FullMethod != snapshotMethod { // learner does not support stream RPC except Snapshot
+		if s.IsMemberExist(s.MemberID()) && s.IsLearner() && info.FullMethod != snapshotMethod { // learner does not support stream RPC except Snapshot
 			return rpctypes.ErrGRPCNotSupportedForLearner
 		}
 

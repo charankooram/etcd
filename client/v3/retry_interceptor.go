@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
@@ -42,6 +43,8 @@ func (c *Client) unaryClientInterceptor(optFuncs ...retryOption) grpc.UnaryClien
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		ctx = withVersion(ctx)
 		grpcOpts, retryOpts := filterCallOptions(opts)
+		var p peer.Peer
+		grpcOpts = append(grpcOpts, grpc.Peer(&p))
 		callOpts := reuseOrNewWithCallOptions(intOpts, retryOpts)
 		// short circuit for simplicity, and avoiding allocations.
 		if callOpts.max == 0 {
@@ -65,6 +68,7 @@ func (c *Client) unaryClientInterceptor(optFuncs ...retryOption) grpc.UnaryClien
 			c.GetLogger().Warn(
 				"retrying of unary invoker failed",
 				zap.String("target", cc.Target()),
+				zap.String("peer", p.String()),
 				zap.String("method", method),
 				zap.Uint("attempt", attempt),
 				zap.Error(lastErr),
@@ -146,14 +150,19 @@ func (c *Client) streamClientInterceptor(optFuncs ...retryOption) grpc.StreamCli
 // shouldRefreshToken checks whether there's a need to refresh the token based on the error and callOptions,
 // and returns a boolean value.
 func (c *Client) shouldRefreshToken(err error, callOpts *options) bool {
-	if rpctypes.Error(err) == rpctypes.ErrUserEmpty {
+	if c.Token != "" {
+		// do not try to refresh the token as it is set by user
+		return false
+	}
+
+	if errors.Is(rpctypes.Error(err), rpctypes.ErrUserEmpty) {
 		// refresh the token when username, password is present but the server returns ErrUserEmpty
 		// which is possible when the client token is cleared somehow
 		return c.authTokenBundle != nil // equal to c.Username != "" && c.Password != ""
 	}
 
 	return callOpts.retryAuth &&
-		(rpctypes.Error(err) == rpctypes.ErrInvalidAuthToken || rpctypes.Error(err) == rpctypes.ErrAuthOldRevision)
+		(errors.Is(rpctypes.Error(err), rpctypes.ErrInvalidAuthToken) || errors.Is(rpctypes.Error(err), rpctypes.ErrAuthOldRevision))
 }
 
 func (c *Client) refreshToken(ctx context.Context) error {
@@ -235,12 +244,12 @@ func (s *serverStreamingRetryingStream) RecvMsg(m any) error {
 		}
 		newStream, err := s.reestablishStreamAndResendBuffer(s.ctx)
 		if err != nil {
-			s.client.lg.Error("failed reestablishStreamAndResendBuffer", zap.Error(err))
+			s.client.GetLogger().Error("failed reestablishStreamAndResendBuffer", zap.Error(err))
 			return err // TODO(mwitkow): Maybe dial and transport errors should be retriable?
 		}
 		s.setStream(newStream)
 
-		s.client.lg.Warn("retrying RecvMsg", zap.Error(lastErr))
+		s.client.GetLogger().Warn("retrying RecvMsg", zap.Error(lastErr))
 		attemptRetry, lastErr = s.receiveMsgAndIndicateRetry(m)
 		if !attemptRetry {
 			return lastErr
@@ -254,7 +263,7 @@ func (s *serverStreamingRetryingStream) receiveMsgAndIndicateRetry(m any) (bool,
 	wasGood := s.receivedGood
 	s.mu.RUnlock()
 	err := s.getStream().RecvMsg(m)
-	if err == nil || err == io.EOF {
+	if err == nil || errors.Is(err, io.EOF) {
 		s.mu.Lock()
 		s.receivedGood = true
 		s.mu.Unlock()
@@ -273,11 +282,10 @@ func (s *serverStreamingRetryingStream) receiveMsgAndIndicateRetry(m any) (bool,
 	if s.client.shouldRefreshToken(err, s.callOpts) {
 		gtErr := s.client.refreshToken(s.ctx)
 		if gtErr != nil {
-			s.client.lg.Warn("retry failed to fetch new auth token", zap.Error(gtErr))
+			s.client.GetLogger().Warn("retry failed to fetch new auth token", zap.Error(gtErr))
 			return false, err // return the original error for simplicity
 		}
 		return true, err
-
 	}
 	return isSafeRetry(s.client, err, s.callOpts), err
 }
@@ -311,7 +319,7 @@ func waitRetryBackoff(ctx context.Context, attempt uint, callOpts *options) erro
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return contextErrToGrpcErr(ctx.Err())
+			return contextErrToGRPCErr(ctx.Err())
 		case <-timer.C:
 		}
 	}
@@ -340,7 +348,7 @@ func isSafeRetry(c *Client, err error, callOpts *options) bool {
 	case nonRepeatable:
 		return isSafeRetryMutableRPC(err)
 	default:
-		c.lg.Warn("unrecognized retry policy", zap.String("retryPolicy", callOpts.retryPolicy.String()))
+		c.GetLogger().Warn("unrecognized retry policy", zap.String("retryPolicy", callOpts.retryPolicy.String()))
 		return false
 	}
 }
@@ -349,25 +357,23 @@ func isContextError(err error) bool {
 	return status.Code(err) == codes.DeadlineExceeded || status.Code(err) == codes.Canceled
 }
 
-func contextErrToGrpcErr(err error) error {
-	switch err {
-	case context.DeadlineExceeded:
-		return status.Errorf(codes.DeadlineExceeded, err.Error())
-	case context.Canceled:
-		return status.Errorf(codes.Canceled, err.Error())
+func contextErrToGRPCErr(err error) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, err.Error())
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, err.Error())
 	default:
-		return status.Errorf(codes.Unknown, err.Error())
+		return status.Error(codes.Unknown, err.Error())
 	}
 }
 
-var (
-	defaultOptions = &options{
-		retryPolicy: nonRepeatable,
-		max:         0, // disable
-		backoffFunc: backoffLinearWithJitter(50*time.Millisecond /*jitter*/, 0.10),
-		retryAuth:   true,
-	}
-)
+var defaultOptions = &options{
+	retryPolicy: nonRepeatable,
+	max:         0, // disable
+	backoffFunc: backoffLinearWithJitter(50*time.Millisecond /*jitter*/, 0.10),
+	retryAuth:   true,
+}
 
 // backoffFunc denotes a family of functions that control the backoff duration between call retries.
 //

@@ -16,6 +16,7 @@ package backend
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"go.uber.org/zap"
 
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 type BucketID int
@@ -41,6 +43,26 @@ type Bucket interface {
 	// overwrites on a bucket should only fetch with limit=1, but safeRangeBucket
 	// is known to never overwrite any key so range is safe.
 	IsSafeRangeBucket() bool
+}
+
+// safeRangeBucketNames records, by raw bucket name, which buckets are known to never overwrite
+// an existing key (see Bucket.IsSafeRangeBucket). This package intentionally has no knowledge of
+// concrete bucket names, so higher-level packages that construct Bucket values (e.g. schema) are
+// expected to call RegisterSafeRangeBucket for any bucket where IsSafeRangeBucket() is true.
+//
+// Non-blocking defrag's stop-the-world catch-up phase uses this to decide whether a bucket can
+// be caught up with a simple "keys greater than the last one copied" range scan, or must be
+// fully re-copied because it can be mutated in place.
+var safeRangeBucketNames sync.Map // map[string]struct{}
+
+// RegisterSafeRangeBucket records that a bucket is append-only, i.e. IsSafeRangeBucket() == true.
+func RegisterSafeRangeBucket(name []byte) {
+	safeRangeBucketNames.Store(string(name), struct{}{})
+}
+
+func isRegisteredSafeRangeBucket(name []byte) bool {
+	_, ok := safeRangeBucketNames.Load(string(name))
+	return ok
 }
 
 type BatchTx interface {
@@ -124,7 +146,7 @@ func (t *batchTx) UnsafeCreateBucket(bucket Bucket) {
 
 func (t *batchTx) UnsafeDeleteBucket(bucket Bucket) {
 	err := t.tx.DeleteBucket(bucket.Name())
-	if err != nil && err != bolt.ErrBucketNotFound {
+	if err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 		t.backend.lg.Fatal(
 			"failed to delete a bucket",
 			zap.Stringer("bucket-name", bucket),

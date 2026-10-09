@@ -16,6 +16,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/anishathalye/porcupine"
@@ -23,87 +24,83 @@ import (
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/tests/v3/robustness/identity"
 )
 
-// AppendableHistory allows to collect history of sequential operations.
+// AppendableHistory allows collecting the history of sequential operations.
 //
-// Ensures that operation history is compatible with porcupine library, by preventing concurrent requests sharing the
-// same stream id. For failed requests, we don't know their return time, so generate new stream id.
+// Ensures that the operation history is compatible with the porcupine library by preventing concurrent requests from sharing the
+// same stream id. For failed requests, we don't know their return time, so we generate a new stream id.
 //
 // Appending needs to be done in order of operation execution time (start, end time).
-// Operations time should be calculated as time.Since common base time to ensure that Go monotonic time is used.
+// Operation time should be calculated as time.Since a common base time to ensure that Go monotonic time is used.
 // More in https://github.com/golang/go/blob/96add980ad27faed627f26ef1ab09e8fe45d6bd1/src/time/time.go#L10.
 type AppendableHistory struct {
-	// streamId for the next operation. Used for porcupine.Operation.ClientId as porcupine assumes no concurrent requests.
-	streamId int
+	// streamID for the next operation. Used for porcupine.Operation.ClientId as porcupine assumes no concurrent requests.
+	streamID int
 	// If needed a new streamId is requested from idProvider.
 	idProvider identity.Provider
+	// lastOperation holds the last operation of each stream.
+	lastOperation map[int]*porcupine.Operation
 
 	History
 }
 
 func NewAppendableHistory(ids identity.Provider) *AppendableHistory {
 	return &AppendableHistory{
-		streamId:   ids.NewStreamId(),
-		idProvider: ids,
+		streamID:      ids.NewStreamID(),
+		idProvider:    ids,
+		lastOperation: make(map[int]*porcupine.Operation),
 		History: History{
-			successful: []porcupine.Operation{},
-			failed:     []porcupine.Operation{},
+			operations: []porcupine.Operation{},
 		},
 	}
 }
 
-func (h *AppendableHistory) AppendRange(startKey, endKey string, revision, limit int64, start, end time.Duration, resp *clientv3.GetResponse) {
+func (h *AppendableHistory) AppendRange(startKey, endKey string, revision, limit int64, keysOnly bool, start, end time.Duration, resp *clientv3.GetResponse, err error) {
+	request := staleRangeRequest(startKey, endKey, limit, revision, keysOnly)
+	if err != nil {
+		h.appendFailed(request, start, end, err)
+		return
+	}
 	var respRevision int64
+	var respMemberID uint64
 	if resp != nil && resp.Header != nil {
 		respRevision = resp.Header.Revision
+		respMemberID = resp.Header.MemberId
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    staleRangeRequest(startKey, endKey, limit, revision),
-		Call:     start.Nanoseconds(),
-		Output:   rangeResponse(resp.Kvs, resp.Count, respRevision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, rangeResponseWithMemberID(resp.Kvs, resp.Count, respRevision, MemberID(respMemberID)))
 }
 
 func (h *AppendableHistory) AppendPut(key, value string, start, end time.Duration, resp *clientv3.PutResponse, err error) {
 	request := putRequest(key, value)
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
 	var revision int64
+	var memberID MemberID
 	if resp != nil && resp.Header != nil {
 		revision = resp.Header.Revision
+		memberID = MemberID(resp.Header.MemberId)
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   putResponse(revision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, putResponseWithMemberID(revision, memberID))
 }
 
 func (h *AppendableHistory) AppendPutWithLease(key, value string, leaseID int64, start, end time.Duration, resp *clientv3.PutResponse, err error) {
 	request := putWithLeaseRequest(key, value, leaseID)
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
 	var revision int64
+	var memberID MemberID
 	if resp != nil && resp.Header != nil {
 		revision = resp.Header.Revision
+		memberID = MemberID(resp.Header.MemberId)
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   putResponse(revision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, putResponseWithMemberID(revision, memberID))
 }
 
 func (h *AppendableHistory) AppendLeaseGrant(start, end time.Duration, resp *clientv3.LeaseGrantResponse, err error) {
@@ -113,60 +110,48 @@ func (h *AppendableHistory) AppendLeaseGrant(start, end time.Duration, resp *cli
 	}
 	request := leaseGrantRequest(leaseID)
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
 	var revision int64
+	var memberID MemberID
 	if resp != nil && resp.ResponseHeader != nil {
 		revision = resp.ResponseHeader.Revision
+		memberID = MemberID(resp.ResponseHeader.MemberId)
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   leaseGrantResponse(revision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, leaseGrantResponseWithMemberID(revision, memberID))
 }
 
 func (h *AppendableHistory) AppendLeaseRevoke(id int64, start, end time.Duration, resp *clientv3.LeaseRevokeResponse, err error) {
 	request := leaseRevokeRequest(id)
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
 	var revision int64
+	var memberID MemberID
 	if resp != nil && resp.Header != nil {
 		revision = resp.Header.Revision
+		memberID = MemberID(resp.Header.MemberId)
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   leaseRevokeResponse(revision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, leaseRevokeResponseWithMemberID(revision, memberID))
 }
 
 func (h *AppendableHistory) AppendDelete(key string, start, end time.Duration, resp *clientv3.DeleteResponse, err error) {
 	request := deleteRequest(key)
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
 	var revision int64
+	var memberID MemberID
 	var deleted int64
 	if resp != nil && resp.Header != nil {
 		revision = resp.Header.Revision
+		memberID = MemberID(resp.Header.MemberId)
 		deleted = resp.Deleted
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   deleteResponse(deleted, revision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, deleteResponseWithMemberID(deleted, revision, memberID))
 }
 
 func (h *AppendableHistory) AppendTxn(cmp []clientv3.Cmp, clientOnSuccessOps, clientOnFailure []clientv3.Op, start, end time.Duration, resp *clientv3.TxnResponse, err error) {
@@ -184,58 +169,52 @@ func (h *AppendableHistory) AppendTxn(cmp []clientv3.Cmp, clientOnSuccessOps, cl
 	}
 	request := txnRequest(conds, modelOnSuccess, modelOnFailure)
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
 	var revision int64
+	var memberID MemberID
 	if resp != nil && resp.Header != nil {
 		revision = resp.Header.Revision
+		memberID = MemberID(resp.Header.MemberId)
 	}
 	results := []EtcdOperationResult{}
 	for _, resp := range resp.Responses {
 		results = append(results, toEtcdOperationResult(resp))
 	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   txnResponse(results, resp.Succeeded, revision),
-		Return:   end.Nanoseconds(),
+	h.appendSuccessful(request, start, end, txnResponseWithMemberID(results, resp.Succeeded, revision, memberID))
+}
+
+func (h *AppendableHistory) appendClientError(request EtcdRequest, start, end time.Duration, err error) {
+	h.appendSuccessful(request, start, end, MaybeEtcdResponse{
+		EtcdResponse: EtcdResponse{ClientError: err.Error()},
 	})
 }
 
-func (h *AppendableHistory) appendSuccessful(op porcupine.Operation) {
-	if op.Call >= op.Return {
-		panic(fmt.Sprintf("Invalid operation, call(%d) >= return(%d)", op.Call, op.Return))
+func (h *AppendableHistory) appendSuccessful(request EtcdRequest, start, end time.Duration, response MaybeEtcdResponse) {
+	op := porcupine.Operation{
+		ClientId: h.streamID,
+		Input:    request,
+		Call:     start.Nanoseconds(),
+		Output:   response,
+		Return:   end.Nanoseconds(),
+		Metadata: response,
 	}
-	if len(h.successful) > 0 {
-		prevSuccessful := h.successful[len(h.successful)-1]
-		if op.Call <= prevSuccessful.Call {
-			panic(fmt.Sprintf("Out of order append, new.call(%d) <= prev.call(%d)", op.Call, prevSuccessful.Call))
-		}
-		if op.Call <= prevSuccessful.Return {
-			panic(fmt.Sprintf("Overlapping operations, new.call(%d) <= prev.return(%d)", op.Call, prevSuccessful.Return))
-		}
-	}
-	if len(h.failed) > 0 {
-		prevFailed := h.failed[len(h.failed)-1]
-		if op.Call <= prevFailed.Call {
-			panic(fmt.Sprintf("Out of order append, new.call(%d) <= prev.call(%d)", op.Call, prevFailed.Call))
-		}
-	}
-	h.successful = append(h.successful, op)
+	h.append(op)
 }
 
 func toEtcdCondition(cmp clientv3.Cmp) (cond EtcdCondition) {
+	compare := cmp.GetCompare()
 	switch {
-	case cmp.Result == etcdserverpb.Compare_EQUAL && cmp.Target == etcdserverpb.Compare_MOD:
+	case compare.GetResult() == etcdserverpb.Compare_EQUAL && compare.GetTarget() == etcdserverpb.Compare_MOD:
 		cond.Key = string(cmp.KeyBytes())
-	case cmp.Result == etcdserverpb.Compare_EQUAL && cmp.Target == etcdserverpb.Compare_CREATE:
+		cond.ExpectedRevision = compare.GetTargetUnion().(*etcdserverpb.Compare_ModRevision).ModRevision
+	case compare.GetResult() == etcdserverpb.Compare_EQUAL && compare.GetTarget() == etcdserverpb.Compare_VERSION:
+		cond.ExpectedVersion = compare.GetTargetUnion().(*etcdserverpb.Compare_Version).Version
 		cond.Key = string(cmp.KeyBytes())
 	default:
-		panic(fmt.Sprintf("Compare not supported, target: %q, result: %q", cmp.Target, cmp.Result))
+		panic(fmt.Sprintf("Compare not supported, target: %q, result: %q", compare.GetTarget(), compare.GetResult()))
 	}
-	cond.ExpectedRevision = cmp.TargetUnion.(*etcdserverpb.Compare_ModRevision).ModRevision
 	return cond
 }
 
@@ -275,6 +254,7 @@ func toEtcdOperationResult(resp *etcdserverpb.ResponseOp) EtcdOperationResult {
 				ValueRevision: ValueRevision{
 					Value:       ToValueOrHash(string(kv.Value)),
 					ModRevision: kv.ModRevision,
+					Version:     kv.Version,
 				},
 			}
 		}
@@ -298,48 +278,64 @@ func toEtcdOperationResult(resp *etcdserverpb.ResponseOp) EtcdOperationResult {
 func (h *AppendableHistory) AppendDefragment(start, end time.Duration, resp *clientv3.DefragmentResponse, err error) {
 	request := defragmentRequest()
 	if err != nil {
-		h.appendFailed(request, start.Nanoseconds(), err)
+		h.appendFailed(request, start, end, err)
 		return
 	}
-	var revision int64
-	if resp != nil && resp.Header != nil {
-		revision = resp.Header.Revision
-	}
-	h.appendSuccessful(porcupine.Operation{
-		ClientId: h.streamId,
-		Input:    request,
-		Call:     start.Nanoseconds(),
-		Output:   defragmentResponse(revision),
-		Return:   end.Nanoseconds(),
-	})
+	h.appendSuccessful(request, start, end, defragmentResponse())
 }
 
-func (h *AppendableHistory) appendFailed(request EtcdRequest, call int64, err error) {
-	if len(h.successful) > 0 {
-		prevSuccessful := h.successful[len(h.successful)-1]
-		if call <= prevSuccessful.Call {
-			panic(fmt.Sprintf("Out of order append, new.call(%d) <= prev.call(%d)", call, prevSuccessful.Call))
+func (h *AppendableHistory) AppendCompact(rev int64, start, end time.Duration, resp *clientv3.CompactResponse, err error) {
+	request := compactRequest(rev)
+	if err != nil {
+		if strings.Contains(err.Error(), mvcc.ErrCompacted.Error()) {
+			h.appendClientError(request, start, end, mvcc.ErrCompacted)
+			return
 		}
-		if call <= prevSuccessful.Return {
-			panic(fmt.Sprintf("Overlapping operations, new.call(%d) <= prev.return(%d)", call, prevSuccessful.Return))
+		if strings.Contains(err.Error(), mvcc.ErrFutureRev.Error()) {
+			h.appendClientError(request, start, end, mvcc.ErrFutureRev)
+			return
 		}
+		h.appendFailed(request, start, end, err)
+		return
 	}
-	if len(h.failed) > 0 {
-		prevFailed := h.failed[len(h.failed)-1]
-		if call <= prevFailed.Call {
-			panic(fmt.Sprintf("Out of order append, new.call(%d) <= prev.call(%d)", call, prevFailed.Call))
-		}
-	}
-	h.failed = append(h.failed, porcupine.Operation{
-		ClientId: h.streamId,
+	h.appendSuccessful(request, start, end, compactResponse())
+}
+
+func (h *AppendableHistory) appendFailed(request EtcdRequest, start, end time.Duration, err error) {
+	resp := failedResponse(err)
+	op := porcupine.Operation{
+		ClientId: h.streamID,
 		Input:    request,
-		Call:     call,
-		Output:   failedResponse(err),
-		Return:   0, // For failed writes we don't know when request has really finished.
-	})
-	// Operations of single client needs to be sequential.
-	// As we don't know return time of failed operations, all new writes need to be done with new stream id.
-	h.streamId = h.idProvider.NewStreamId()
+		Call:     start.Nanoseconds(),
+		Output:   resp,
+		Return:   end.Nanoseconds(),
+		Metadata: resp,
+	}
+	isRead := request.IsRead()
+	if !isRead {
+		// Operations of single client needs to be sequential.
+		// As we don't know return time of failed operations, all new writes need to be done with new stream id.
+		h.streamID = h.idProvider.NewStreamID()
+	}
+	h.append(op)
+}
+
+func (h *AppendableHistory) append(op porcupine.Operation) {
+	if op.Call >= op.Return {
+		panic(fmt.Sprintf("Invalid operation, call(%d) >= return(%d)", op.Call, op.Return))
+	}
+
+	if prev, ok := h.lastOperation[op.ClientId]; ok {
+		if op.Call <= prev.Call {
+			panic(fmt.Sprintf("Out of order append, new.call(%d) <= prev.call(%d)", op.Call, prev.Call))
+		}
+		if op.Call <= prev.Return {
+			panic(fmt.Sprintf("Overlapping operations, new.call(%d) <= prev.return(%d)", op.Call, prev.Return))
+		}
+	}
+	h.lastOperation[op.ClientId] = &op
+
+	h.operations = append(h.operations, op)
 }
 
 func getRequest(key string) EtcdRequest {
@@ -347,11 +343,11 @@ func getRequest(key string) EtcdRequest {
 }
 
 func staleGetRequest(key string, revision int64) EtcdRequest {
-	return staleRangeRequest(key, "", 0, revision)
+	return staleRangeRequest(key, "", 0, revision, false)
 }
 
 func rangeRequest(start, end string, limit int64) EtcdRequest {
-	return staleRangeRequest(start, end, limit, 0)
+	return staleRangeRequest(start, end, limit, 0, false)
 }
 
 func listRequest(key string, limit int64) EtcdRequest {
@@ -359,11 +355,11 @@ func listRequest(key string, limit int64) EtcdRequest {
 }
 
 func staleListRequest(key string, limit, revision int64) EtcdRequest {
-	return staleRangeRequest(key, clientv3.GetPrefixRangeEnd(key), limit, revision)
+	return staleRangeRequest(key, clientv3.GetPrefixRangeEnd(key), limit, revision, false)
 }
 
-func staleRangeRequest(start, end string, limit, revision int64) EtcdRequest {
-	return EtcdRequest{Type: Range, Range: &RangeRequest{RangeOptions: RangeOptions{Start: start, End: end, Limit: limit}, Revision: revision}}
+func staleRangeRequest(start, end string, limit, revision int64, keysOnly bool) EtcdRequest {
+	return EtcdRequest{Type: Range, Range: &RangeRequest{RangeOptions: RangeOptions{Start: start, End: end, Limit: limit, KeysOnly: keysOnly}, Revision: revision}}
 }
 
 func emptyGetResponse(revision int64) MaybeEtcdResponse {
@@ -371,10 +367,18 @@ func emptyGetResponse(revision int64) MaybeEtcdResponse {
 }
 
 func getResponse(key, value string, modRevision, revision int64) MaybeEtcdResponse {
-	return rangeResponse([]*mvccpb.KeyValue{{Key: []byte(key), Value: []byte(value), ModRevision: modRevision}}, 1, revision)
+	return getResponseWithVer(key, value, modRevision, 1, revision)
+}
+
+func getResponseWithVer(key, value string, modRevision, ver, revision int64) MaybeEtcdResponse {
+	return rangeResponse([]*mvccpb.KeyValue{{Key: []byte(key), Value: []byte(value), ModRevision: modRevision, Version: ver}}, 1, revision)
 }
 
 func rangeResponse(kvs []*mvccpb.KeyValue, count int64, revision int64) MaybeEtcdResponse {
+	return rangeResponseWithMemberID(kvs, count, revision, 0)
+}
+
+func rangeResponseWithMemberID(kvs []*mvccpb.KeyValue, count int64, revision int64, memberID MemberID) MaybeEtcdResponse {
 	result := RangeResponse{KVs: make([]KeyValue, len(kvs)), Count: count}
 
 	for i, kv := range kvs {
@@ -383,10 +387,11 @@ func rangeResponse(kvs []*mvccpb.KeyValue, count int64, revision int64) MaybeEtc
 			ValueRevision: ValueRevision{
 				Value:       ToValueOrHash(string(kv.Value)),
 				ModRevision: kv.ModRevision,
+				Version:     kv.Version,
 			},
 		}
 	}
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Range: &result, Revision: revision}}
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Range: &result, Revision: revision, MemberID: memberID}}
 }
 
 func failedResponse(err error) MaybeEtcdResponse {
@@ -394,7 +399,7 @@ func failedResponse(err error) MaybeEtcdResponse {
 }
 
 func partialResponse(revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{PartialResponse: true, EtcdResponse: EtcdResponse{Revision: revision}}
+	return MaybeEtcdResponse{Persisted: true, PersistedRevision: revision}
 }
 
 func putRequest(key, value string) EtcdRequest {
@@ -402,7 +407,11 @@ func putRequest(key, value string) EtcdRequest {
 }
 
 func putResponse(revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Txn: &TxnResponse{Results: []EtcdOperationResult{{}}}, Revision: revision}}
+	return putResponseWithMemberID(revision, 0)
+}
+
+func putResponseWithMemberID(revision int64, memberID MemberID) MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Txn: &TxnResponse{Results: []EtcdOperationResult{{}}}, Revision: revision, MemberID: memberID}}
 }
 
 func deleteRequest(key string) EtcdRequest {
@@ -410,7 +419,11 @@ func deleteRequest(key string) EtcdRequest {
 }
 
 func deleteResponse(deleted int64, revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Txn: &TxnResponse{Results: []EtcdOperationResult{{Deleted: deleted}}}, Revision: revision}}
+	return deleteResponseWithMemberID(deleted, revision, 0)
+}
+
+func deleteResponseWithMemberID(deleted int64, revision int64, memberID MemberID) MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Txn: &TxnResponse{Results: []EtcdOperationResult{{Deleted: deleted}}}, Revision: revision, MemberID: memberID}}
 }
 
 func compareRevisionAndPutRequest(key string, expectedRevision int64, value string) EtcdRequest {
@@ -461,7 +474,11 @@ func txnEmptyResponse(succeeded bool, revision int64) MaybeEtcdResponse {
 }
 
 func txnResponse(result []EtcdOperationResult, succeeded bool, revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Txn: &TxnResponse{Results: result, Failure: !succeeded}, Revision: revision}}
+	return txnResponseWithMemberID(result, succeeded, revision, 0)
+}
+
+func txnResponseWithMemberID(result []EtcdOperationResult, succeeded bool, revision int64, memberID MemberID) MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Txn: &TxnResponse{Results: result, Failure: !succeeded}, Revision: revision, MemberID: memberID}}
 }
 
 func putWithLeaseRequest(key, value string, leaseID int64) EtcdRequest {
@@ -473,7 +490,11 @@ func leaseGrantRequest(leaseID int64) EtcdRequest {
 }
 
 func leaseGrantResponse(revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{LeaseGrant: &LeaseGrantReponse{}, Revision: revision}}
+	return leaseGrantResponseWithMemberID(revision, 0)
+}
+
+func leaseGrantResponseWithMemberID(revision int64, memberID MemberID) MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{LeaseGrant: &LeaseGrantResponse{}, Revision: revision, MemberID: memberID}}
 }
 
 func leaseRevokeRequest(leaseID int64) EtcdRequest {
@@ -481,66 +502,46 @@ func leaseRevokeRequest(leaseID int64) EtcdRequest {
 }
 
 func leaseRevokeResponse(revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{LeaseRevoke: &LeaseRevokeResponse{}, Revision: revision}}
+	return leaseRevokeResponseWithMemberID(revision, 0)
+}
+
+func leaseRevokeResponseWithMemberID(revision int64, memberID MemberID) MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{LeaseRevoke: &LeaseRevokeResponse{}, Revision: revision, MemberID: memberID}}
 }
 
 func defragmentRequest() EtcdRequest {
 	return EtcdRequest{Type: Defragment, Defragment: &DefragmentRequest{}}
 }
 
-func defragmentResponse(revision int64) MaybeEtcdResponse {
-	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Defragment: &DefragmentResponse{}, Revision: revision}}
+func defragmentResponse() MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Defragment: &DefragmentResponse{}, Revision: RevisionForNonLinearizableResponse}}
+}
+
+func compactRequest(rev int64) EtcdRequest {
+	return EtcdRequest{Type: Compact, Compact: &CompactRequest{Revision: rev}}
+}
+
+func compactResponse() MaybeEtcdResponse {
+	return MaybeEtcdResponse{EtcdResponse: EtcdResponse{Compact: &CompactResponse{}, Revision: RevisionForNonLinearizableResponse}}
 }
 
 type History struct {
-	successful []porcupine.Operation
-	// failed requests are kept separate as we don't know return time of failed operations.
-	// Based on https://github.com/anishathalye/porcupine/issues/10
-	failed []porcupine.Operation
-}
-
-func (h History) Merge(h2 History) History {
-	result := History{
-		successful: make([]porcupine.Operation, 0, len(h.successful)+len(h2.successful)),
-		failed:     make([]porcupine.Operation, 0, len(h.failed)+len(h2.failed)),
-	}
-	result.successful = append(result.successful, h.successful...)
-	result.successful = append(result.successful, h2.successful...)
-	result.failed = append(result.failed, h.failed...)
-	result.failed = append(result.failed, h2.failed...)
-	return result
+	operations []porcupine.Operation
 }
 
 func (h History) Len() int {
-	return len(h.successful) + len(h.failed)
+	return len(h.operations)
 }
 
 func (h History) Operations() []porcupine.Operation {
-	operations := make([]porcupine.Operation, 0, len(h.successful)+len(h.failed))
-	var maxTime int64
-	for _, op := range h.successful {
-		operations = append(operations, op)
-		if op.Return > maxTime {
-			maxTime = op.Return
-		}
-	}
-	for _, op := range h.failed {
-		if op.Call > maxTime {
-			maxTime = op.Call
-		}
-	}
-	// Failed requests don't have a known return time.
-	// Simulate Infinity by using last observed time.
-	for _, op := range h.failed {
-		op.Return = maxTime + time.Second.Nanoseconds()
-		operations = append(operations, op)
-	}
-	return operations
+	operations := make([]porcupine.Operation, 0, len(h.operations))
+
+	return append(operations, h.operations...)
 }
 
 func (h History) MaxRevision() int64 {
 	var maxRevision int64
-	for _, op := range h.successful {
+	for _, op := range h.operations {
 		revision := op.Output.(MaybeEtcdResponse).Revision
 		if revision > maxRevision {
 			maxRevision = revision

@@ -45,13 +45,8 @@ func (r *EtcdManualResolver) Build(target resolver.Target, cc resolver.ClientCon
 	if r.serviceConfig.Err != nil {
 		return nil, r.serviceConfig.Err
 	}
-	res, err := r.Resolver.Build(target, cc, opts)
-	if err != nil {
-		return nil, err
-	}
-	// Populates endpoints stored in r into ClientConn (cc).
-	r.updateState()
-	return res, nil
+	r.Resolver.InitialState(r.state())
+	return r.Resolver.Build(target, cc, opts)
 }
 
 func (r *EtcdManualResolver) SetEndpoints(endpoints []string) {
@@ -60,16 +55,33 @@ func (r *EtcdManualResolver) SetEndpoints(endpoints []string) {
 }
 
 func (r EtcdManualResolver) updateState() {
-	if r.CC != nil {
-		addresses := make([]resolver.Address, len(r.endpoints))
-		for i, ep := range r.endpoints {
-			addr, serverName := endpoint.Interpret(ep)
-			addresses[i] = resolver.Address{Addr: addr, ServerName: serverName}
-		}
-		state := resolver.State{
-			Addresses:     addresses,
-			ServiceConfig: r.serviceConfig,
-		}
-		r.UpdateState(state)
+	if getCC(r) != nil {
+		r.UpdateState(r.state())
 	}
+}
+
+// state builds the resolver state (endpoints + ServiceConfig) from the
+// endpoints currently stored in r.
+func (r EtcdManualResolver) state() resolver.State {
+	eps := make([]resolver.Endpoint, len(r.endpoints))
+	for i, ep := range r.endpoints {
+		addr, serverName := endpoint.Interpret(ep)
+		eps[i] = resolver.Endpoint{Addresses: []resolver.Address{
+			{Addr: addr, ServerName: serverName},
+		}}
+	}
+	return resolver.State{
+		Endpoints:     eps,
+		ServiceConfig: r.serviceConfig,
+	}
+}
+
+func getCC(r EtcdManualResolver) (cc resolver.ClientConn) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			cc = nil
+		}
+	}()
+
+	return r.CC()
 }

@@ -1,6 +1,6 @@
 # Branch management
 
-## Guide
+## GUIDE
 
 * New development occurs on the [main branch][main].
 * The main branch should always have a green build!
